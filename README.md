@@ -1,11 +1,5 @@
 # 🧠 MCP - Titan Memory Server implementation
 
-Colaboration between [@jasonkneen](https://github.com/jasonkneen) and [@ExpressionsBot](https://github.com/ExpressionsBot) 
-
-Follow us on X
-- [jasonkneen](https://x.com/jasonkneen)
-- [megaprompt](https://x.com/megaprompt)
-
 An implementation inspired by Google Research's paper ["Generative AI for Programming: A Common Task Framework"](https://arxiv.org/abs/2501.00663). This server provides a neural memory system that can learn and predict sequences while maintaining state through a memory vector, following principles outlined in the research for improved code generation and understanding.
 
 ## 📚 Research Background
@@ -154,3 +148,11 @@ npm test
 ## 📝 License
 
 MIT License - feel free to use and modify as needed!
+
+Fixed the Implementation originally done by 
+Colaboration between [@jasonkneen](https://github.com/jasonkneen) and [@ExpressionsBot](https://github.com/ExpressionsBot) 
+
+Follow us on X
+- [jasonkneen](https://x.com/jasonkneen)
+- [megaprompt](https://x.com/megaprompt)
+
