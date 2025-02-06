@@ -1,4 +1,5 @@
-# 🧠 MCP Titan - An Advanced Memory Server 
+# 🧠 MCP Titan - An Advanced Memory Server
+
 [![smithery badge](https://smithery.ai/badge/@henryhawke/mcp-titan)](https://smithery.ai/server/@henryhawke/mcp-titan)
 
 An implementation inspired by Google Research's paper ["Generative AI for Programming: A Common Task Framework"](https://arxiv.org/abs/2501.00663). This server provides a neural memory system that can learn and predict sequences while maintaining state through a memory vector, following principles outlined in the research for improved code generation and understanding.
@@ -34,6 +35,7 @@ npx -y @smithery/cli install @henryhawke/mcp-titan --client claude
 ```
 
 ### Manual Installation
+
 ```bash
 # Install dependencies
 npm install
@@ -48,7 +50,9 @@ npm test
 ## 🛠️ Available MCP Tools
 
 ### 1. 🎯 init_model
+
 Initialize the Titan Memory model with custom configuration.
+
 ```typescript
 {
   inputDim?: number;  // Input dimension (default: 64)
@@ -57,7 +61,9 @@ Initialize the Titan Memory model with custom configuration.
 ```
 
 ### 2. 📚 train_step
+
 Perform a single training step with current and next state vectors.
+
 ```typescript
 {
   x_t: number[];    // Current state vector
@@ -66,7 +72,9 @@ Perform a single training step with current and next state vectors.
 ```
 
 ### 3. 🔄 forward_pass
+
 Run a forward pass through the model with an input vector.
+
 ```typescript
 {
   x: number[]; // Input vector
@@ -74,7 +82,9 @@ Run a forward pass through the model with an input vector.
 ```
 
 ### 4. 💾 save_model
+
 Save the model to a specified path.
+
 ```typescript
 {
   path: string; // Path to save the model
@@ -82,7 +92,9 @@ Save the model to a specified path.
 ```
 
 ### 5. 📂 load_model
+
 Load the model from a specified path.
+
 ```typescript
 {
   path: string; // Path to load the model from
@@ -90,13 +102,18 @@ Load the model from a specified path.
 ```
 
 ### 6. ℹ️ get_status
+
 Get current model status and configuration.
+
 ```typescript
-{} // No parameters required
+{
+} // No parameters required
 ```
 
 ### 7. 🔄 train_sequence
+
 Train the model on a sequence of vectors.
+
 ```typescript
 {
   sequence: number[][]; // Array of vectors to train on
@@ -107,19 +124,19 @@ Train the model on a sequence of vectors.
 
 ```typescript
 // Initialize model
-await callTool('init_model', { inputDim: 64, outputDim: 64 });
+await callTool("init_model", { inputDim: 64, outputDim: 64 });
 
 // Train on a sequence
 const sequence = [
-  [1, 0, 0, /* ... */],
-  [0, 1, 0, /* ... */],
-  [0, 0, 1, /* ... */]
+  [1, 0, 0 /* ... */],
+  [0, 1, 0 /* ... */],
+  [0, 0, 1 /* ... */],
 ];
-await callTool('train_sequence', { sequence });
+await callTool("train_sequence", { sequence });
 
 // Run forward pass
-const result = await callTool('forward_pass', {
-  x: [1, 0, 0, /* ... */]
+const result = await callTool("forward_pass", {
+  x: [1, 0, 0 /* ... */],
 });
 ```
 
@@ -135,6 +152,7 @@ const result = await callTool('forward_pass', {
 ## 🧪 Testing
 
 The project includes comprehensive tests covering:
+
 - Model initialization and configuration
 - Training and forward pass operations
 - Memory state management
@@ -143,6 +161,7 @@ The project includes comprehensive tests covering:
 - Tensor cleanup and memory management
 
 Run tests with:
+
 ```bash
 npm test
 ```
@@ -159,10 +178,5 @@ npm test
 
 MIT License - feel free to use and modify as needed!
 
-Fixed the Implementation originally done by 
-Colaboration between [@jasonkneen](https://github.com/jasonkneen) and [@ExpressionsBot](https://github.com/ExpressionsBot) 
-
-Follow us on X
-- [jasonkneen](https://x.com/jasonkneen)
-- [megaprompt](https://x.com/megaprompt)
-
+Fixed the Implementation originally done by
+https://github.com/synthience/mcp-titan-cognitive-memory/

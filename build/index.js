@@ -2,14 +2,20 @@
 import '@tensorflow/tfjs-node'; // Import and register the Node.js backend
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import express from 'express';
+import bodyParser from 'body-parser';
 import { CallToolRequestSchema, CallToolResultSchema, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import * as tf from '@tensorflow/tfjs';
 import { TitanMemoryModel } from './model.js';
 import { wrapTensor } from './types.js';
-class TitanMemoryServer {
-    constructor() {
+export class TitanMemoryServer {
+    constructor(port = 3000) {
         this.model = null;
         this.memoryVec = null;
+        this.port = port;
+        this.app = express();
+        // Setup express middleware
+        this.app.use(bodyParser.json());
         // Initialize MCP server metadata
         this.server = new Server({
             name: 'titan-memory-server',
@@ -333,11 +339,23 @@ class TitanMemoryServer {
             this.memoryVec = null;
         }
     }
+    async testRequest(name, args) {
+        const response = await this.server.request({ method: 'call_tool', params: { name, arguments: args } }, CallToolResultSchema);
+        return response;
+    }
     async run() {
-        await this.server.connect(new StdioServerTransport());
-        console.log('Titan Memory MCP server running on stdio');
+        // Connect stdio for CLI usage
+        const stdioTransport = new StdioServerTransport();
+        await this.server.connect(stdioTransport);
+        // Start HTTP server
+        this.app.listen(this.port, () => {
+            console.log('Titan Memory MCP server running on stdio');
+        });
     }
 }
-const server = new TitanMemoryServer();
-server.run().catch(console.error);
+// Create and run server instance if this is the main module
+if (import.meta.url === `file://${process.argv[1]}`) {
+    const server = new TitanMemoryServer();
+    server.run().catch(console.error);
+}
 //# sourceMappingURL=index.js.map
