@@ -15,4 +15,5 @@ export declare class TitanMemoryServer {
     private setupAutomaticMemory;
     run(): Promise<void>;
     private cleanup;
+    private handleToolCall;
 }

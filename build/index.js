@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import '@tensorflow/tfjs-node'; // Import and register the Node.js backend
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import express from 'express';
 import bodyParser from 'body-parser';
@@ -67,7 +67,10 @@ export class TitanMemoryServer {
         const capabilities = {
             tools: {
                 list: tools,
-                call: true,
+                call: {
+                    request: CallToolRequestSchema,
+                    result: CallToolResultSchema
+                },
                 listChanged: true
             }
         };
@@ -79,92 +82,21 @@ export class TitanMemoryServer {
         });
         // Set up error handler
         this.server.onerror = (error) => console.error('[MCP Error]', error);
-        // Register capabilities before setting up handlers
+        // Register capabilities and handlers
         this.server.registerCapabilities(capabilities);
-        // Set up tool handlers
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             try {
-                switch (request.params.name) {
-                    case 'init_model': {
-                        const { inputDim = 768, outputDim = 768 } = request.params.arguments;
-                        this.model = new TitanMemoryModel({ inputDim, outputDim });
-                        return {
-                            content: [{
-                                    type: 'text',
-                                    text: JSON.stringify({ config: { inputDim, outputDim } })
-                                }]
-                        };
-                    }
-                    case 'train_step': {
-                        if (!this.model || !this.memoryVec) {
-                            throw new Error('Model not initialized');
-                        }
-                        const { x_t, x_next } = request.params.arguments;
-                        const x_tT = wrapTensor(tf.tensor1d(x_t));
-                        const x_nextT = wrapTensor(tf.tensor1d(x_next));
-                        const memoryT = wrapTensor(this.memoryVec);
-                        const cost = this.model.trainStep(x_tT, x_nextT, memoryT);
-                        const { predicted, newMemory, surprise } = this.model.forward(x_tT, memoryT);
-                        const result = {
-                            cost: cost.dataSync()[0],
-                            predicted: Array.from(predicted.dataSync()),
-                            surprise: surprise.dataSync()[0]
-                        };
-                        [x_tT, x_nextT, memoryT, predicted, newMemory, surprise, cost].forEach(t => t.dispose());
-                        return {
-                            content: [{
-                                    type: 'text',
-                                    text: JSON.stringify(result)
-                                }]
-                        };
-                    }
-                    case 'forward_pass': {
-                        if (!this.model || !this.memoryVec) {
-                            throw new Error('Model not initialized');
-                        }
-                        const { x } = request.params.arguments;
-                        const xT = wrapTensor(tf.tensor1d(x));
-                        const memoryT = wrapTensor(this.memoryVec);
-                        const { predicted, newMemory, surprise } = this.model.forward(xT, memoryT);
-                        const result = {
-                            predicted: Array.from(predicted.dataSync()),
-                            memory: Array.from(newMemory.dataSync()),
-                            surprise: surprise.dataSync()[0]
-                        };
-                        [xT, memoryT, predicted, newMemory, surprise].forEach(t => t.dispose());
-                        return {
-                            content: [{
-                                    type: 'text',
-                                    text: JSON.stringify(result)
-                                }]
-                        };
-                    }
-                    case 'get_memory_state': {
-                        if (!this.memoryVec) {
-                            throw new Error('Memory not initialized');
-                        }
-                        const stats = {
-                            mean: tf.mean(this.memoryVec).dataSync()[0],
-                            std: tf.moments(this.memoryVec).variance.sqrt().dataSync()[0]
-                        };
-                        return {
-                            content: [{
-                                    type: 'text',
-                                    text: JSON.stringify({
-                                        memoryStats: stats,
-                                        memorySize: this.memoryVec.shape[0],
-                                        status: 'active'
-                                    })
-                                }]
-                        };
-                    }
-                    default:
-                        throw new Error(`Unknown tool: ${request.params.name}`);
-                }
+                const result = await this.handleToolCall(request);
+                return {
+                    content: [{
+                            type: 'text',
+                            text: JSON.stringify(result)
+                        }]
+                };
             }
             catch (error) {
                 const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-                throw new Error(`Error: ${errorMessage}`);
+                throw new Error(`Error handling tool call: ${errorMessage}`);
             }
         });
         // Set up memory and cleanup
@@ -212,6 +144,65 @@ export class TitanMemoryServer {
         if (this.memoryVec) {
             this.memoryVec.dispose();
             this.memoryVec = null;
+        }
+    }
+    async handleToolCall(request) {
+        switch (request.params.name) {
+            case 'init_model': {
+                const { inputDim = 768, outputDim = 768 } = request.params.arguments;
+                this.model = new TitanMemoryModel({ inputDim, outputDim });
+                return { config: { inputDim, outputDim } };
+            }
+            case 'train_step': {
+                if (!this.model || !this.memoryVec) {
+                    throw new Error('Model not initialized');
+                }
+                const { x_t, x_next } = request.params.arguments;
+                const x_tT = wrapTensor(tf.tensor1d(x_t));
+                const x_nextT = wrapTensor(tf.tensor1d(x_next));
+                const memoryT = wrapTensor(this.memoryVec);
+                const cost = this.model.trainStep(x_tT, x_nextT, memoryT);
+                const { predicted, newMemory, surprise } = this.model.forward(x_tT, memoryT);
+                const result = {
+                    cost: cost.dataSync()[0],
+                    predicted: Array.from(predicted.dataSync()),
+                    surprise: surprise.dataSync()[0]
+                };
+                [x_tT, x_nextT, memoryT, predicted, newMemory, surprise, cost].forEach(t => t.dispose());
+                return result;
+            }
+            case 'forward_pass': {
+                if (!this.model || !this.memoryVec) {
+                    throw new Error('Model not initialized');
+                }
+                const { x } = request.params.arguments;
+                const xT = wrapTensor(tf.tensor1d(x));
+                const memoryT = wrapTensor(this.memoryVec);
+                const { predicted, newMemory, surprise } = this.model.forward(xT, memoryT);
+                const result = {
+                    predicted: Array.from(predicted.dataSync()),
+                    memory: Array.from(newMemory.dataSync()),
+                    surprise: surprise.dataSync()[0]
+                };
+                [xT, memoryT, predicted, newMemory, surprise].forEach(t => t.dispose());
+                return result;
+            }
+            case 'get_memory_state': {
+                if (!this.memoryVec) {
+                    throw new Error('Memory not initialized');
+                }
+                const stats = {
+                    mean: tf.mean(this.memoryVec).dataSync()[0],
+                    std: tf.moments(this.memoryVec).variance.sqrt().dataSync()[0]
+                };
+                return {
+                    memoryStats: stats,
+                    memorySize: this.memoryVec.shape[0],
+                    status: 'active'
+                };
+            }
+            default:
+                throw new Error(`Unknown tool: ${request.params.name}`);
         }
     }
 }
