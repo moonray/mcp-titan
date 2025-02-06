@@ -13,8 +13,6 @@ export declare class TitanMemoryServer {
     private autoSaveInterval;
     constructor(port?: number);
     private setupAutomaticMemory;
-    private saveMemoryState;
-    private setupToolHandlers;
     run(): Promise<void>;
     private cleanup;
 }

@@ -6,6 +6,7 @@ export declare class TitanExpressServer {
     private port;
     constructor(port?: number);
     private setupMiddleware;
+    private setupHandlers;
     private setupRoutes;
     start(): Promise<void>;
     stop(): Promise<void>;

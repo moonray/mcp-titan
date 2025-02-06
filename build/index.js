@@ -21,27 +21,43 @@ export class TitanMemoryServer {
         this.app.use(bodyParser.json());
         this.memoryPath = path.join(os.homedir(), '.cursor', 'titan-memory');
         const tools = {
-            process_input: {
-                name: 'process_input',
-                description: 'Process input text and update memory state automatically',
+            init_model: {
+                name: 'init_model',
+                description: 'Initialize the Titan Memory model',
                 parameters: {
                     type: 'object',
                     properties: {
-                        text: {
-                            type: 'string',
-                            description: 'Input text to process'
-                        },
-                        context: {
-                            type: 'string',
-                            description: 'Optional context information'
-                        }
+                        inputDim: { type: 'number', description: 'Input dimension' },
+                        outputDim: { type: 'number', description: 'Output dimension' }
+                    }
+                }
+            },
+            train_step: {
+                name: 'train_step',
+                description: 'Perform a training step',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        x_t: { type: 'array', items: { type: 'number' } },
+                        x_next: { type: 'array', items: { type: 'number' } }
                     },
-                    required: ['text']
+                    required: ['x_t', 'x_next']
+                }
+            },
+            forward_pass: {
+                name: 'forward_pass',
+                description: 'Run a forward pass through the model',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        x: { type: 'array', items: { type: 'number' } }
+                    },
+                    required: ['x']
                 }
             },
             get_memory_state: {
                 name: 'get_memory_state',
-                description: 'Get current memory state and insights',
+                description: 'Get current memory state',
                 parameters: {
                     type: 'object',
                     properties: {}
@@ -50,8 +66,9 @@ export class TitanMemoryServer {
         };
         const capabilities = {
             tools: {
-                listChanged: true,
-                list: tools
+                list: tools,
+                call: true,
+                listChanged: true
             }
         };
         this.server = new Server({
@@ -60,93 +77,72 @@ export class TitanMemoryServer {
             description: 'Automatic memory-augmented learning for Cursor',
             capabilities
         });
-        // Register tool handlers
-        this.setupToolHandlers();
-        this.setupAutomaticMemory();
-        // Error handling
+        // Set up error handler
         this.server.onerror = (error) => console.error('[MCP Error]', error);
-        process.on('SIGINT', async () => {
-            await this.cleanup();
-            process.exit(0);
-        });
-    }
-    async setupAutomaticMemory() {
-        try {
-            await fs.mkdir(this.memoryPath, { recursive: true });
-            // Initialize model with default config if not exists
-            if (!this.model) {
-                this.model = new TitanMemoryModel({ inputDim: 768, outputDim: 768 });
-            }
-            // Try to load existing memory
-            const memoryFile = path.join(this.memoryPath, 'memory.json');
-            try {
-                const data = await fs.readFile(memoryFile, 'utf-8');
-                const memoryData = JSON.parse(data);
-                this.memoryVec = tf.variable(tf.tensor1d(memoryData));
-            }
-            catch {
-                // Initialize new memory if none exists
-                this.memoryVec = tf.variable(tf.zeros([768]));
-            }
-            // Set up auto-save every 5 minutes
-            this.autoSaveInterval = setInterval(async () => {
-                await this.saveMemoryState();
-            }, 5 * 60 * 1000);
-        }
-        catch (error) {
-            console.error('Error setting up automatic memory:', error);
-        }
-    }
-    async saveMemoryState() {
-        if (!this.memoryVec)
-            return;
-        try {
-            const memoryData = Array.from(this.memoryVec.dataSync());
-            await fs.writeFile(path.join(this.memoryPath, 'memory.json'), JSON.stringify(memoryData), 'utf-8');
-        }
-        catch (error) {
-            console.error('Error saving memory state:', error);
-        }
-    }
-    setupToolHandlers() {
+        // Register capabilities before setting up handlers
+        this.server.registerCapabilities(capabilities);
+        // Set up tool handlers
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             try {
                 switch (request.params.name) {
-                    case 'process_input': {
-                        if (!this.model || !this.memoryVec) {
-                            throw new Error('Memory system not initialized');
-                        }
-                        const { text, context } = request.params.arguments;
-                        // Convert text to vector using a stable hash function
-                        const inputVector = tf.tidy(() => {
-                            const hash = Array.from(text).reduce((h, c) => Math.imul(31, h) + c.charCodeAt(0) | 0, 0);
-                            return tf.randomNormal([768]).mul(tf.scalar(hash));
-                        });
-                        const input = wrapTensor(inputVector);
-                        const memory = wrapTensor(this.memoryVec);
-                        const { predicted, newMemory, surprise } = this.model.forward(input, memory);
-                        // Update memory state
-                        this.memoryVec.assign(tf.tensor(newMemory.dataSync()));
-                        // Save memory state after update
-                        await this.saveMemoryState();
-                        const result = {
-                            surprise: surprise.dataSync()[0],
-                            memoryUpdated: true,
-                            insight: `Memory updated with new information. Surprise level: ${surprise.dataSync()[0]}`
-                        };
-                        [input, memory, predicted, newMemory, surprise, inputVector].forEach(t => t.dispose());
+                    case 'init_model': {
+                        const { inputDim = 768, outputDim = 768 } = request.params.arguments;
+                        this.model = new TitanMemoryModel({ inputDim, outputDim });
                         return {
                             content: [{
                                     type: 'text',
-                                    text: JSON.stringify(result, null, 2)
+                                    text: JSON.stringify({ config: { inputDim, outputDim } })
+                                }]
+                        };
+                    }
+                    case 'train_step': {
+                        if (!this.model || !this.memoryVec) {
+                            throw new Error('Model not initialized');
+                        }
+                        const { x_t, x_next } = request.params.arguments;
+                        const x_tT = wrapTensor(tf.tensor1d(x_t));
+                        const x_nextT = wrapTensor(tf.tensor1d(x_next));
+                        const memoryT = wrapTensor(this.memoryVec);
+                        const cost = this.model.trainStep(x_tT, x_nextT, memoryT);
+                        const { predicted, newMemory, surprise } = this.model.forward(x_tT, memoryT);
+                        const result = {
+                            cost: cost.dataSync()[0],
+                            predicted: Array.from(predicted.dataSync()),
+                            surprise: surprise.dataSync()[0]
+                        };
+                        [x_tT, x_nextT, memoryT, predicted, newMemory, surprise, cost].forEach(t => t.dispose());
+                        return {
+                            content: [{
+                                    type: 'text',
+                                    text: JSON.stringify(result)
+                                }]
+                        };
+                    }
+                    case 'forward_pass': {
+                        if (!this.model || !this.memoryVec) {
+                            throw new Error('Model not initialized');
+                        }
+                        const { x } = request.params.arguments;
+                        const xT = wrapTensor(tf.tensor1d(x));
+                        const memoryT = wrapTensor(this.memoryVec);
+                        const { predicted, newMemory, surprise } = this.model.forward(xT, memoryT);
+                        const result = {
+                            predicted: Array.from(predicted.dataSync()),
+                            memory: Array.from(newMemory.dataSync()),
+                            surprise: surprise.dataSync()[0]
+                        };
+                        [xT, memoryT, predicted, newMemory, surprise].forEach(t => t.dispose());
+                        return {
+                            content: [{
+                                    type: 'text',
+                                    text: JSON.stringify(result)
                                 }]
                         };
                     }
                     case 'get_memory_state': {
                         if (!this.memoryVec) {
-                            throw new Error('Memory system not initialized');
+                            throw new Error('Memory not initialized');
                         }
-                        const memoryData = Array.from(this.memoryVec.dataSync());
                         const stats = {
                             mean: tf.mean(this.memoryVec).dataSync()[0],
                             std: tf.moments(this.memoryVec).variance.sqrt().dataSync()[0]
@@ -156,15 +152,14 @@ export class TitanMemoryServer {
                                     type: 'text',
                                     text: JSON.stringify({
                                         memoryStats: stats,
-                                        memorySize: memoryData.length,
+                                        memorySize: this.memoryVec.shape[0],
                                         status: 'active'
-                                    }, null, 2)
+                                    })
                                 }]
                         };
                     }
-                    default: {
+                    default:
                         throw new Error(`Unknown tool: ${request.params.name}`);
-                    }
                 }
             }
             catch (error) {
@@ -172,18 +167,25 @@ export class TitanMemoryServer {
                 throw new Error(`Error: ${errorMessage}`);
             }
         });
+        // Set up memory and cleanup
+        this.setupAutomaticMemory();
+        process.on('SIGINT', async () => {
+            await this.cleanup();
+            process.exit(0);
+        });
+    }
+    async setupAutomaticMemory() {
+        try {
+            await fs.mkdir(this.memoryPath, { recursive: true });
+            if (!this.memoryVec) {
+                this.memoryVec = tf.variable(tf.zeros([768]));
+            }
+        }
+        catch (error) {
+            console.error('Error setting up automatic memory:', error);
+        }
     }
     async run() {
-        // Set up Express routes for MCP
-        this.app.get('/', (req, res) => {
-            res.json({
-                name: 'Titan Memory MCP Server',
-                version: '0.1.0',
-                description: 'Automatic memory-augmented learning for Cursor',
-                status: 'active',
-                memoryPath: this.memoryPath
-            });
-        });
         // Connect stdio for Cursor
         const stdioTransport = new StdioServerTransport();
         await this.server.connect(stdioTransport);
@@ -207,7 +209,6 @@ export class TitanMemoryServer {
         if (this.autoSaveInterval) {
             clearInterval(this.autoSaveInterval);
         }
-        await this.saveMemoryState();
         if (this.memoryVec) {
             this.memoryVec.dispose();
             this.memoryVec = null;

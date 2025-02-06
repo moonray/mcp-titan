@@ -6,6 +6,18 @@ import { wrapTensor } from './types.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, CallToolResultSchema, ServerCapabilities } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { Request, Response } from 'express';
+
+interface ToolHandlers {
+  storeMemory: {
+    subject: string;
+    relationship: string;
+    object: string;
+  };
+  recallMemory: {
+    query: string;
+  };
+}
 
 export class TitanExpressServer {
   private app: express.Application;
@@ -50,7 +62,14 @@ export class TitanExpressServer {
     const capabilities: ServerCapabilities = {
       tools: {
         listChanged: true,
-        list: tools
+        list: tools,
+        call: {
+          enabled: true,
+          schemas: {
+            request: CallToolRequestSchema,
+            result: CallToolResultSchema
+          }
+        }
       }
     };
 
@@ -73,7 +92,7 @@ export class TitanExpressServer {
       try {
         switch (request.params.name) {
           case 'storeMemory': {
-            const { subject, relationship, object } = request.params.arguments as any;
+            const { subject, relationship, object } = request.params.arguments as ToolHandlers['storeMemory'];
             // Implementation
             return {
               content: [{
@@ -83,7 +102,7 @@ export class TitanExpressServer {
             };
           }
           case 'recallMemory': {
-            const { query } = request.params.arguments as any;
+            const { query } = request.params.arguments as ToolHandlers['recallMemory'];
             // Implementation
             return {
               content: [{
@@ -103,7 +122,7 @@ export class TitanExpressServer {
   }
 
   private setupRoutes() {
-    this.app.get('/status', (req: express.Request, res: express.Response) => {
+    this.app.get('/status', (req: Request, res: Response) => {
       res.json({
         status: 'ok',
         model: this.model ? 'initialized' : 'not initialized'
