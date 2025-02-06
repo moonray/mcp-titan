@@ -7,7 +7,7 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import * as tf from '@tensorflow/tfjs';
 import { TitanMemoryModel } from './model.js';
-import { wrapTensor } from './types.js';
+import { wrapTensor, unwrapTensor } from './types.js';
 import path from 'path';
 import os from 'os';
 import fs from 'fs/promises';
@@ -139,41 +139,32 @@ export class TitanMemoryServer {
       if (!this.memoryVec) {
         this.memoryVec = tf.variable(tf.zeros([768]));
       }
+
+      // Set up auto-save interval
+      if (!this.autoSaveInterval) {
+        this.autoSaveInterval = setInterval(async () => {
+          try {
+            if (this.memoryVec) {
+              const memoryState = {
+                vector: Array.from(this.memoryVec.dataSync()),
+                timestamp: Date.now()
+              };
+              await fs.writeFile(
+                path.join(this.memoryPath, 'memory.json'),
+                JSON.stringify(memoryState),
+                'utf-8'
+              );
+            }
+          } catch (error) {
+            console.error('Error saving memory state:', error);
+          }
+        }, 5 * 60 * 1000); // Every 5 minutes
+
+        // Prevent the interval from keeping the process alive
+        this.autoSaveInterval.unref();
+      }
     } catch (error) {
       console.error('Error setting up automatic memory:', error);
-    }
-  }
-
-  public async run() {
-    // Connect stdio for Cursor
-    const stdioTransport = new StdioServerTransport();
-    await this.server.connect(stdioTransport);
-
-    // Start HTTP server with dynamic port
-    const server = this.app.listen(this.port, () => {
-      this.port = (server.address() as any).port;
-      console.log(`Titan Memory MCP server running on port ${this.port}`);
-    });
-
-    // Handle server errors
-    server.on('error', (error: any) => {
-      if (error.code === 'EADDRINUSE') {
-        console.error(`Port ${this.port} is already in use, trying another port...`);
-        server.listen(0); // Let OS assign random port
-      } else {
-        console.error('Server error:', error);
-      }
-    });
-  }
-
-  private async cleanup(): Promise<void> {
-    if (this.autoSaveInterval) {
-      clearInterval(this.autoSaveInterval);
-    }
-
-    if (this.memoryVec) {
-      this.memoryVec.dispose();
-      this.memoryVec = null;
     }
   }
 
@@ -182,6 +173,7 @@ export class TitanMemoryServer {
       case 'init_model': {
         const { inputDim = 768, outputDim = 768 } = request.params.arguments as TitanMemoryTools['init_model'];
         this.model = new TitanMemoryModel({ inputDim, outputDim });
+        this.memoryVec = tf.variable(tf.zeros([outputDim]));
         return { config: { inputDim, outputDim } };
       }
       case 'train_step': {
@@ -194,10 +186,14 @@ export class TitanMemoryServer {
         const memoryT = wrapTensor(this.memoryVec);
         const cost = this.model.trainStep(x_tT, x_nextT, memoryT);
         const { predicted, newMemory, surprise } = this.model.forward(x_tT, memoryT);
+
+        // Update memory vector with new state
+        this.memoryVec.assign(unwrapTensor(newMemory));
+
         const result = {
-          cost: cost.dataSync()[0],
-          predicted: Array.from(predicted.dataSync()),
-          surprise: surprise.dataSync()[0]
+          cost: unwrapTensor(cost).dataSync()[0],
+          predicted: Array.from(unwrapTensor(predicted).dataSync()),
+          surprise: unwrapTensor(surprise).dataSync()[0]
         };
         [x_tT, x_nextT, memoryT, predicted, newMemory, surprise, cost].forEach(t => t.dispose());
         return result;
@@ -210,10 +206,14 @@ export class TitanMemoryServer {
         const xT = wrapTensor(tf.tensor1d(x));
         const memoryT = wrapTensor(this.memoryVec);
         const { predicted, newMemory, surprise } = this.model.forward(xT, memoryT);
+
+        // Update memory vector with new state
+        this.memoryVec.assign(unwrapTensor(newMemory));
+
         const result = {
-          predicted: Array.from(predicted.dataSync()),
-          memory: Array.from(newMemory.dataSync()),
-          surprise: surprise.dataSync()[0]
+          predicted: Array.from(unwrapTensor(predicted).dataSync()),
+          memory: Array.from(unwrapTensor(newMemory).dataSync()),
+          surprise: unwrapTensor(surprise).dataSync()[0]
         };
         [xT, memoryT, predicted, newMemory, surprise].forEach(t => t.dispose());
         return result;
@@ -234,6 +234,95 @@ export class TitanMemoryServer {
       }
       default:
         throw new Error(`Unknown tool: ${request.params.name}`);
+    }
+  }
+
+  public async run() {
+    try {
+      // Connect stdio for Cursor
+      const stdioTransport = new StdioServerTransport();
+      await this.server.connect(stdioTransport);
+
+      // Start HTTP server with dynamic port
+      await new Promise<void>((resolve, reject) => {
+        const server = this.app.listen(this.port, () => {
+          this.port = (server.address() as any).port;
+          console.log(`Titan Memory MCP server running on port ${this.port}`);
+          resolve();
+        });
+
+        server.on('error', (error: any) => {
+          if (error.code === 'EADDRINUSE') {
+            console.error(`Port ${this.port} is already in use, trying another port...`);
+            server.listen(0); // Let OS assign random port
+          } else {
+            console.error('Server error:', error);
+            reject(error);
+          }
+        });
+
+        // Prevent the server from keeping the process alive
+        server.unref();
+      });
+
+      // Set up cleanup handlers
+      process.on('SIGINT', async () => {
+        await this.cleanup();
+        process.exit(0);
+      });
+
+      process.on('SIGTERM', async () => {
+        await this.cleanup();
+        process.exit(0);
+      });
+
+      // Handle uncaught errors
+      process.on('uncaughtException', async (error) => {
+        console.error('Uncaught exception:', error);
+        await this.cleanup();
+        process.exit(1);
+      });
+
+      process.on('unhandledRejection', async (error) => {
+        console.error('Unhandled rejection:', error);
+        await this.cleanup();
+        process.exit(1);
+      });
+    } catch (error) {
+      console.error('Error starting server:', error);
+      throw error;
+    }
+  }
+
+  private async cleanup(): Promise<void> {
+    try {
+      if (this.autoSaveInterval) {
+        clearInterval(this.autoSaveInterval);
+      }
+
+      if (this.memoryVec) {
+        this.memoryVec.dispose();
+        this.memoryVec = null;
+      }
+
+      if (this.model) {
+        this.model = null;
+      }
+
+      // Close HTTP server if it's running
+      if (this.app) {
+        await new Promise<void>((resolve) => {
+          const server = this.app.listen().close(() => resolve());
+          server.unref();
+        });
+      }
+
+      // Close MCP server connection
+      if (this.server) {
+        await this.server.close();
+      }
+    } catch (error) {
+      console.error('Error during cleanup:', error);
     }
   }
 }
