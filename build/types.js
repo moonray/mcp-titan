@@ -1,3 +1,4 @@
+import { z } from "zod";
 // Simple wrapper
 export class TensorWrapper {
     constructor(tensor) {
@@ -31,4 +32,12 @@ export function unwrapTensor(tensor) {
     }
     throw new Error('Cannot unwrap non-TensorWrapper object');
 }
+export const StoreMemoryInput = z.object({
+    subject: z.string(),
+    relationship: z.string(),
+    object: z.string()
+});
+export const RecallMemoryInput = z.object({
+    query: z.string()
+});
 //# sourceMappingURL=types.js.map

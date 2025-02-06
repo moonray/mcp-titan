@@ -20,41 +20,47 @@ export class TitanMemoryServer {
         this.app = express();
         this.app.use(bodyParser.json());
         this.memoryPath = path.join(os.homedir(), '.cursor', 'titan-memory');
+        const tools = {
+            process_input: {
+                name: 'process_input',
+                description: 'Process input text and update memory state automatically',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        text: {
+                            type: 'string',
+                            description: 'Input text to process'
+                        },
+                        context: {
+                            type: 'string',
+                            description: 'Optional context information'
+                        }
+                    },
+                    required: ['text']
+                }
+            },
+            get_memory_state: {
+                name: 'get_memory_state',
+                description: 'Get current memory state and insights',
+                parameters: {
+                    type: 'object',
+                    properties: {}
+                }
+            }
+        };
+        const capabilities = {
+            tools: {
+                listChanged: true,
+                list: tools
+            }
+        };
         this.server = new Server({
             name: 'titan-memory',
             version: '0.1.0',
             description: 'Automatic memory-augmented learning for Cursor',
-            capabilities: {
-                tools: {
-                    process_input: {
-                        name: 'process_input',
-                        description: 'Process input text and update memory state automatically',
-                        parameters: {
-                            type: 'object',
-                            properties: {
-                                text: {
-                                    type: 'string',
-                                    description: 'Input text to process'
-                                },
-                                context: {
-                                    type: 'string',
-                                    description: 'Optional context information'
-                                }
-                            },
-                            required: ['text']
-                        }
-                    },
-                    get_memory_state: {
-                        name: 'get_memory_state',
-                        description: 'Get current memory state and insights',
-                        parameters: {
-                            type: 'object',
-                            properties: {}
-                        }
-                    }
-                }
-            }
+            capabilities
         });
+        // Register tool handlers
         this.setupToolHandlers();
         this.setupAutomaticMemory();
         // Error handling

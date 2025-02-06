@@ -1,4 +1,5 @@
 import * as tf from '@tensorflow/tfjs';
+import { z } from "zod";
 
 // Basic interface for an in-house "tensor" object
 export interface ITensor extends tf.TensorContainerObject {
@@ -54,7 +55,7 @@ export interface IMemoryModel {
 
 // Simple wrapper
 export class TensorWrapper implements ITensor {
-  constructor(private tensor: tf.Tensor) {}
+  constructor(private tensor: tf.Tensor) { }
 
   [key: string]: any; // Required for TensorContainerObject
 
@@ -92,3 +93,13 @@ export function unwrapTensor(tensor: ITensor): tf.Tensor {
   }
   throw new Error('Cannot unwrap non-TensorWrapper object');
 }
+
+export const StoreMemoryInput = z.object({
+  subject: z.string(),
+  relationship: z.string(),
+  object: z.string()
+});
+
+export const RecallMemoryInput = z.object({
+  query: z.string()
+});

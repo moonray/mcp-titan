@@ -1,4 +1,5 @@
 import * as tf from '@tensorflow/tfjs';
+import { z } from "zod";
 export interface ITensor extends tf.TensorContainerObject {
     dataSync(): number[];
     dispose(): void;
@@ -63,3 +64,23 @@ export declare class TensorWrapper implements ITensor {
 }
 export declare function wrapTensor(tensor: tf.Tensor): ITensor;
 export declare function unwrapTensor(tensor: ITensor): tf.Tensor;
+export declare const StoreMemoryInput: z.ZodObject<{
+    subject: z.ZodString;
+    relationship: z.ZodString;
+    object: z.ZodString;
+}, "strip", z.ZodTypeAny, {
+    object: string;
+    subject: string;
+    relationship: string;
+}, {
+    object: string;
+    subject: string;
+    relationship: string;
+}>;
+export declare const RecallMemoryInput: z.ZodObject<{
+    query: z.ZodString;
+}, "strip", z.ZodTypeAny, {
+    query: string;
+}, {
+    query: string;
+}>;

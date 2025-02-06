@@ -3,6 +3,7 @@ import bodyParser from 'body-parser';
 import * as tf from '@tensorflow/tfjs';
 import { TitanMemoryModel } from './model.js';
 import { wrapTensor } from './types.js';
+import { Server } from '@modelcontextprotocol/sdk';
 export class TitanExpressServer {
     constructor(port = 3000) {
         this.server = null;
@@ -12,6 +13,43 @@ export class TitanExpressServer {
         this.app = express();
         this.setupMiddleware();
         this.setupRoutes();
+        // Update server initialization with proper MCP Server options
+        this.server = new Server({
+            name: "TitanMemoryServer",
+            version: "0.1.0",
+            capabilities: {
+                tools: true // Enable tools capability
+            }
+        });
+        // Update tool registration with typed handlers
+        this.server.registerTool({
+            name: "storeMemory",
+            description: "Stores information in the knowledge graph",
+            parameters: {
+                type: "object",
+                properties: {
+                    subject: { type: "string" },
+                    relationship: { type: "string" },
+                    object: { type: "string" }
+                },
+                required: ["subject", "relationship", "object"]
+            }
+        }, async (input) => {
+            // Implementation
+        });
+        this.server.registerTool({
+            name: "recallMemory",
+            description: "Recalls information from the knowledge graph",
+            parameters: {
+                type: "object",
+                properties: {
+                    query: { type: "string" }
+                },
+                required: ["query"]
+            }
+        }, async (input) => {
+            // Implementation
+        });
     }
     setupMiddleware() {
         this.app.use(bodyParser.json());
