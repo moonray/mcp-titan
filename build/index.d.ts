@@ -9,14 +9,12 @@ export declare class TitanMemoryServer {
     protected memoryVec: tf.Variable | null;
     private app;
     private port;
+    private memoryPath;
+    private autoSaveInterval;
     constructor(port?: number);
+    private setupAutomaticMemory;
+    private saveMemoryState;
     private setupToolHandlers;
-    cleanup(): Promise<void>;
-    testRequest(name: string, args: any): Promise<{
-        content: Array<{
-            type: string;
-            text: string;
-        }>;
-    }>;
     run(): Promise<void>;
+    private cleanup;
 }

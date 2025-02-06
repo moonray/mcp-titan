@@ -17,7 +17,9 @@
     "start": "node build/index.js",
     "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest",
     "clean": "rimraf build",
-    "prebuild": "npm run clean"
+    "prebuild": "npm run clean",
+    "prepare": "npm run build",
+    "postinstall": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "latest",
@@ -38,5 +40,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

@@ -6,6 +6,8 @@ An implementation inspired by Google Research's paper ["Generative AI for Progra
 
 ## 📚 Research Background
 
+A new neural long-term memory module that learns to memorize historical context and helps attention to attend to the current context while utilizing long past information. This neural memory has the advantage of fast parallelizable training while maintaining a fast inference. From a memory perspective, we argue that attention due to its limited context but accurate dependency modeling performs as a short-term memory, while neural memory due to its ability to memorize the data, acts as a long-term, more persistent, memory.
+
 This implementation draws from the concepts presented in the Google Research paper (Muennighoff et al., 2024) which introduces a framework for evaluating and improving code generation models. The Titan Memory Server implements key concepts from the paper:
 
 - Memory-augmented sequence learning
@@ -180,3 +182,160 @@ MIT License - feel free to use and modify as needed!
 
 Fixed the Implementation originally done by
 https://github.com/synthience/mcp-titan-cognitive-memory/
+
+# Titan Memory MCP Server
+
+A Model Context Protocol (MCP) server implementation that provides automatic memory-augmented learning capabilities for Cursor. This server maintains a persistent memory state that evolves based on interactions, enabling contextual awareness and learning over time.
+
+## Features
+
+- 🧠 Automatic memory management and persistence
+- 🔄 Real-time memory updates based on input
+- 📊 Memory state analysis and insights
+- 🔌 Seamless integration with Cursor via MCP
+- 🚀 Dynamic port allocation for HTTP endpoints
+- 💾 Automatic state saving every 5 minutes
+
+## Installation
+
+```bash
+# Install from npm
+npm install @henryhawke/mcp-titan
+
+# Or clone and install locally
+git clone https://github.com/henryhawke/mcp-titan.git
+cd mcp-titan
+npm install
+```
+
+## Usage
+
+### As a Cursor MCP Server
+
+1. Add the following to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "titan-memory": {
+      "command": "node",
+      "args": ["/path/to/mcp-titan/build/index.js"],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}
+```
+
+2. Restart Claude Desktop
+3. Look for the hammer icon to confirm the server is connected
+4. Use the available tools:
+   - `process_input`: Process text and update memory
+   - `get_memory_state`: Retrieve current memory insights
+
+### As a Standalone Server
+
+```bash
+# Build and start the server
+npm run build && npm start
+
+# The server will run on stdio for MCP and start an HTTP server on a dynamic port
+```
+
+## Development
+
+### Prerequisites
+
+- Node.js >= 18.0.0
+- npm >= 7.0.0
+
+### Setup
+
+```bash
+# Install dependencies
+npm install
+
+# Build the project
+npm run build
+
+# Run tests
+npm test
+```
+
+### Project Structure
+
+```
+src/
+├── __tests__/        # Test files
+├── index.ts          # Main server implementation
+├── model.ts          # TitanMemory model implementation
+└── types.ts          # TypeScript type definitions
+```
+
+### Available Scripts
+
+- `npm run build`: Build the project
+- `npm start`: Start the server
+- `npm test`: Run tests
+- `npm run clean`: Clean build artifacts
+
+## API Reference
+
+### Tools
+
+#### process_input
+
+Process text input and update memory state.
+
+```typescript
+interface ProcessInputParams {
+  text: string;
+  context?: string;
+}
+```
+
+#### get_memory_state
+
+Retrieve current memory state and statistics.
+
+```typescript
+interface MemoryState {
+  memoryStats: {
+    mean: number;
+    std: number;
+  };
+  memorySize: number;
+  status: string;
+}
+```
+
+### HTTP Endpoints
+
+- `GET /`: Server information and status
+- `POST /mcp`: MCP protocol endpoint
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### Development Guidelines
+
+1. Follow the existing code style
+2. Add tests for new features
+3. Update documentation as needed
+4. Ensure all tests pass before submitting PR
+5. Keep PRs focused and atomic
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Built with [Model Context Protocol](https://modelcontextprotocol.io)
+- Uses [TensorFlow.js](https://tensorflow.org/js) for memory operations

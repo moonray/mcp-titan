@@ -3,12 +3,23 @@ import { TitanMemoryServer } from '../index.js';
 describe('TitanMemoryServer Tests', () => {
   let server: TitanMemoryServer;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    process.env.NODE_ENV = 'test';
     server = new TitanMemoryServer();
+    await server.run();
+  });
+
+  beforeEach(async () => {
+    // Initialize model before each test
+    await server.testRequest('init_model', {
+      inputDim: 32,
+      outputDim: 32,
+    });
   });
 
   afterAll(async () => {
     await server.cleanup();
+    process.env.NODE_ENV = undefined;
   });
 
   test('Initialize model with config', async () => {
