@@ -1,4 +1,5 @@
 # 🧠 MCP Titan - An Advanced Memory Server 
+[![smithery badge](https://smithery.ai/badge/@henryhawke/mcp-titan)](https://smithery.ai/server/@henryhawke/mcp-titan)
 
 An implementation inspired by Google Research's paper ["Generative AI for Programming: A Common Task Framework"](https://arxiv.org/abs/2501.00663). This server provides a neural memory system that can learn and predict sequences while maintaining state through a memory vector, following principles outlined in the research for improved code generation and understanding.
 
@@ -24,6 +25,15 @@ These features align with the paper's goals of improving code understanding and 
 
 ## 📦 Installation
 
+### Installing via Smithery
+
+To install Titan Memory Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@henryhawke/mcp-titan):
+
+```bash
+npx -y @smithery/cli install @henryhawke/mcp-titan --client claude
+```
+
+### Manual Installation
 ```bash
 # Install dependencies
 npm install
