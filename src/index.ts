@@ -7,7 +7,7 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import * as tf from '@tensorflow/tfjs';
 import { TitanMemoryModel } from './model.js';
-import { wrapTensor, unwrapTensor } from './types.js';
+import { wrapTensor, unwrapTensor, ITensor, IMemoryState } from './types.js';
 import path from 'path';
 import os from 'os';
 import fs from 'fs/promises';
@@ -30,7 +30,7 @@ interface TitanMemoryTools {
 export class TitanMemoryServer {
   protected server: Server;
   protected model: TitanMemoryModel | null = null;
-  protected memoryVec: tf.Variable | null = null;
+  protected memoryState: IMemoryState | null = null;
   private app: express.Application;
   private port: number;
   private memoryPath: string;
@@ -45,41 +45,41 @@ export class TitanMemoryServer {
     const tools = {
       init_model: {
         name: 'init_model',
-        description: 'Initialize the Titan Memory model',
+        description: 'Initialize the Titan Memory model for learning code patterns',
         parameters: {
           type: 'object',
           properties: {
-            inputDim: { type: 'number', description: 'Input dimension' },
-            outputDim: { type: 'number', description: 'Output dimension' }
+            inputDim: { type: 'number', description: 'Size of input vectors (default: 768)' },
+            outputDim: { type: 'number', description: 'Size of memory state (default: 768)' }
           }
         }
       },
       train_step: {
         name: 'train_step',
-        description: 'Perform a training step',
+        description: 'Train the model on a sequence of code to improve pattern recognition',
         parameters: {
           type: 'object',
           properties: {
-            x_t: { type: 'array', items: { type: 'number' } },
-            x_next: { type: 'array', items: { type: 'number' } }
+            x_t: { type: 'array', items: { type: 'number' }, description: 'Current code state vector' },
+            x_next: { type: 'array', items: { type: 'number' }, description: 'Next code state vector' }
           },
           required: ['x_t', 'x_next']
         }
       },
       forward_pass: {
         name: 'forward_pass',
-        description: 'Run a forward pass through the model',
+        description: 'Predict the next likely code pattern based on current input',
         parameters: {
           type: 'object',
           properties: {
-            x: { type: 'array', items: { type: 'number' } }
+            x: { type: 'array', items: { type: 'number' }, description: 'Current code state vector' }
           },
           required: ['x']
         }
       },
       get_memory_state: {
         name: 'get_memory_state',
-        description: 'Get current memory state',
+        description: 'Get insights about what patterns the model has learned',
         parameters: {
           type: 'object',
           properties: {}
@@ -99,9 +99,9 @@ export class TitanMemoryServer {
     };
 
     this.server = new Server({
-      name: 'titan-memory',
-      version: '0.1.0',
-      description: 'Automatic memory-augmented learning for Cursor',
+      name: 'mcp-titan',
+      version: '0.1.2',
+      description: 'AI-powered code memory that learns from your coding patterns to provide better suggestions and insights',
       capabilities
     });
 
@@ -136,17 +136,23 @@ export class TitanMemoryServer {
   private async setupAutomaticMemory() {
     try {
       await fs.mkdir(this.memoryPath, { recursive: true });
-      if (!this.memoryVec) {
-        this.memoryVec = tf.variable(tf.zeros([768]));
+      if (!this.memoryState) {
+        this.memoryState = {
+          shortTerm: tf.zeros([768]),
+          longTerm: tf.zeros([768]),
+          meta: tf.zeros([768])
+        };
       }
 
       // Set up auto-save interval
       if (!this.autoSaveInterval) {
         this.autoSaveInterval = setInterval(async () => {
           try {
-            if (this.memoryVec) {
+            if (this.memoryState) {
               const memoryState = {
-                vector: Array.from(this.memoryVec.dataSync()),
+                shortTerm: Array.from(this.memoryState.shortTerm.dataSync()),
+                longTerm: Array.from(this.memoryState.longTerm.dataSync()),
+                meta: Array.from(this.memoryState.meta.dataSync()),
                 timestamp: Date.now()
               };
               await fs.writeFile(
@@ -173,62 +179,69 @@ export class TitanMemoryServer {
       case 'init_model': {
         const { inputDim = 768, outputDim = 768 } = request.params.arguments as TitanMemoryTools['init_model'];
         this.model = new TitanMemoryModel({ inputDim, outputDim });
-        this.memoryVec = tf.variable(tf.zeros([outputDim]));
+
+        // Initialize three-tier memory state
+        const zeros = tf.zeros([outputDim]);
+        this.memoryState = {
+          shortTerm: wrapTensor(zeros),
+          longTerm: wrapTensor(zeros.clone()),
+          meta: wrapTensor(zeros.clone())
+        };
+        zeros.dispose();
+
         return { config: { inputDim, outputDim } };
       }
       case 'train_step': {
-        if (!this.model || !this.memoryVec) {
+        if (!this.model || !this.memoryState) {
           throw new Error('Model not initialized');
         }
         const { x_t, x_next } = request.params.arguments as TitanMemoryTools['train_step'];
         const x_tT = wrapTensor(tf.tensor1d(x_t));
         const x_nextT = wrapTensor(tf.tensor1d(x_next));
-        const memoryT = wrapTensor(this.memoryVec);
-        const cost = this.model.trainStep(x_tT, x_nextT, memoryT);
-        const { predicted, newMemory, surprise } = this.model.forward(x_tT, memoryT);
+        const cost = this.model.trainStep(x_tT, x_nextT, this.memoryState);
+        const { predicted, memoryUpdate } = this.model.forward(x_tT, this.memoryState);
 
-        // Update memory vector with new state
-        this.memoryVec.assign(unwrapTensor(newMemory));
+        // Update memory state
+        this.memoryState = memoryUpdate.newState;
 
         const result = {
-          cost: unwrapTensor(cost).dataSync()[0],
+          cost: unwrapTensor(cost.loss).dataSync()[0],
           predicted: Array.from(unwrapTensor(predicted).dataSync()),
-          surprise: unwrapTensor(surprise).dataSync()[0]
+          surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
         };
-        [x_tT, x_nextT, memoryT, predicted, newMemory, surprise, cost].forEach(t => t.dispose());
+        [x_tT, x_nextT, predicted].forEach(t => t.dispose());
         return result;
       }
       case 'forward_pass': {
-        if (!this.model || !this.memoryVec) {
+        if (!this.model || !this.memoryState) {
           throw new Error('Model not initialized');
         }
         const { x } = request.params.arguments as TitanMemoryTools['forward_pass'];
         const xT = wrapTensor(tf.tensor1d(x));
-        const memoryT = wrapTensor(this.memoryVec);
-        const { predicted, newMemory, surprise } = this.model.forward(xT, memoryT);
+        const { predicted, memoryUpdate } = this.model.forward(xT, this.memoryState);
 
-        // Update memory vector with new state
-        this.memoryVec.assign(unwrapTensor(newMemory));
+        // Update memory state
+        this.memoryState = memoryUpdate.newState;
 
         const result = {
           predicted: Array.from(unwrapTensor(predicted).dataSync()),
-          memory: Array.from(unwrapTensor(newMemory).dataSync()),
-          surprise: unwrapTensor(surprise).dataSync()[0]
+          memory: Array.from(unwrapTensor(memoryUpdate.newState.shortTerm).dataSync()),
+          surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
         };
-        [xT, memoryT, predicted, newMemory, surprise].forEach(t => t.dispose());
+        [xT, predicted].forEach(t => t.dispose());
         return result;
       }
       case 'get_memory_state': {
-        if (!this.memoryVec) {
+        if (!this.memoryState) {
           throw new Error('Memory not initialized');
         }
         const stats = {
-          mean: tf.mean(this.memoryVec).dataSync()[0],
-          std: tf.moments(this.memoryVec).variance.sqrt().dataSync()[0]
+          mean: tf.mean(this.memoryState.shortTerm).dataSync()[0],
+          std: tf.moments(this.memoryState.shortTerm).variance.sqrt().dataSync()[0]
         };
         return {
           memoryStats: stats,
-          memorySize: this.memoryVec.shape[0],
+          memorySize: this.memoryState.shortTerm.shape[0],
           status: 'active'
         };
       }
@@ -300,9 +313,11 @@ export class TitanMemoryServer {
         clearInterval(this.autoSaveInterval);
       }
 
-      if (this.memoryVec) {
-        this.memoryVec.dispose();
-        this.memoryVec = null;
+      if (this.memoryState) {
+        this.memoryState.shortTerm.dispose();
+        this.memoryState.longTerm.dispose();
+        this.memoryState.meta.dispose();
+        this.memoryState = null;
       }
 
       if (this.model) {
