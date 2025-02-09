@@ -6,7 +6,7 @@ An implementation inspired by Google Research's paper ["Generative AI for Progra
 
 ## 📚 Research Background
 
-A new neural long-term memory module that learns to memorize historical context and helps attention to attend to the current context while utilizing long past information. This neural memory has the advantage of fast parallelizable training while maintaining a fast inference. From a memory perspective, we argue that attention due to its limited context but accurate dependency modeling performs as a short-term memory, while neural memory due to its ability to memorize the data, acts as a long-term, more persistent, memory.
+
 
 This implementation draws from the concepts presented in the Google Research paper (Muennighoff et al., 2024) which introduces a framework for evaluating and improving code generation models. The Titan Memory Server implements key concepts from the paper:
 
@@ -339,3 +339,269 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Built with [Model Context Protocol](https://modelcontextprotocol.io)
 - Uses [TensorFlow.js](https://tensorflow.org/js) for memory operations
+
+## Quick Start
+
+### Installation
+
+You can run the Titan Memory MCP server directly using npx without installing it globally:
+
+```bash
+npx -y @smithery/cli@latest run @henryhawke/mcp-titan --config "{}"
+```
+
+### Using with Cursor IDE
+
+1. Open Cursor IDE
+2. Create or edit your Cursor MCP configuration file:
+
+**MacOS/Linux**: `~/Library/Application Support/Cursor/cursor_config.json`
+**Windows**: `%APPDATA%\Cursor\cursor_config.json`
+
+Add the following configuration:
+
+```json
+{
+  "mcpServers": {
+    "titan": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@smithery/cli@latest",
+        "run",
+        "@henryhawke/mcp-titan",
+        "--config",
+        "{}"
+      ]
+    }
+  }
+}
+```
+
+3. Restart Cursor IDE
+
+The Titan Memory server will now be available in your Cursor IDE. You can verify it's working by looking for the hammer icon in the bottom right corner of your editor.
+
+### Configuration Options
+
+You can customize the server behavior by passing configuration options in the JSON config string:
+
+```json
+{
+  "port": 3000 // Optional: HTTP port for REST API (default: 0 - disabled)
+  // Additional configuration options can be added here
+}
+```
+
+Example with custom port:
+
+```bash
+npx -y @smithery/cli@latest run @henryhawke/mcp-titan --config '{"port": 3000}'
+```
+
+### Available Tools
+
+The Titan Memory server provides the following MCP tools:
+
+1. `init_model` - Initialize the memory model with custom dimensions
+2. `train_step` - Train the model on code patterns
+3. `forward_pass` - Get predictions for next likely code patterns
+4. `get_memory_state` - Query the current memory state and statistics
+
+## 🤖 LLM Integration Guide
+
+When using the Titan Memory server with an LLM (like Claude), include the following information in your prompt or system context to help the LLM effectively use the memory tools:
+
+### Memory System Overview
+
+The Titan Memory server implements a three-tier memory system:
+
+- Short-term memory: For immediate context and recent patterns
+- Long-term memory: For persistent patterns and learned behaviors
+- Meta memory: For high-level abstractions and relationships
+
+### Tool Usage Guidelines
+
+1. **Initialization**
+
+   ```typescript
+   // Always initialize the model first
+   await init_model({
+     inputDim: 768, // Match your embedding dimension
+     outputDim: 768, // Memory state dimension
+   });
+   ```
+
+2. **Training**
+
+   - Use `train_step` when you have pairs of sequential states
+   - Input vectors should be normalized embeddings
+   - The surprise metric indicates pattern novelty
+
+3. **Prediction**
+
+   - Use `forward_pass` to predict likely next states
+   - Compare predictions with actual outcomes
+   - High surprise values indicate unexpected patterns
+
+4. **Memory State Analysis**
+   - Use `get_memory_state` to understand current context
+   - Monitor memory statistics for learning progress
+   - Use memory insights to guide responses
+
+### Example Workflow
+
+1. Initialize model at the start of a session
+2. For each new code or text input:
+   - Convert to embedding vector
+   - Run forward pass to get prediction
+   - Use prediction confidence to guide responses
+   - Train on actual outcome
+   - Check memory state for context
+
+### Best Practices
+
+1. **Vector Preparation**
+
+   - Normalize input vectors to unit length
+   - Use consistent embedding dimensions
+   - Handle out-of-vocabulary tokens appropriately
+
+2. **Memory Management**
+
+   - Monitor surprise metrics for anomaly detection
+   - Use memory state insights to maintain context
+   - Consider both short and long-term patterns
+
+3. **Error Handling**
+   - Check if model is initialized before operations
+   - Handle missing or invalid vectors gracefully
+   - Monitor memory usage and performance
+
+### Integration Example
+
+```typescript
+// 1. Initialize model
+await init_model({ inputDim: 768, outputDim: 768 });
+
+// 2. Process new input
+const currentVector = embedText(currentInput);
+const { predicted, surprise } = await forward_pass({ x: currentVector });
+
+// 3. Use prediction and surprise for response
+if (surprise > 0.8) {
+  // Handle unexpected pattern
+} else {
+  // Use prediction for response
+}
+
+// 4. Train on actual outcome
+const nextVector = embedText(actualOutcome);
+await train_step({ x_t: currentVector, x_next: nextVector });
+
+// 5. Check memory state
+const { memoryStats } = await get_memory_state();
+```
+
+### Memory Interpretation
+
+The memory state provides several insights:
+
+- Mean activation indicates general memory utilization
+- Standard deviation shows pattern diversity
+- Memory size reflects context capacity
+- Surprise metrics indicate novelty detection
+
+Use these metrics to:
+
+- Gauge confidence in predictions
+- Detect context shifts
+- Identify learning progress
+- Guide response generation
+
+## 📝 LLM Prompt Template
+
+To enable an LLM to effectively use the Titan Memory system, include the following prompt in your system context:
+
+```
+You have access to a Titan Memory system that provides advanced memory capabilities for maintaining context and learning patterns. This system uses a three-tier memory architecture and provides the following tools:
+
+1. init_model: Initialize the memory model
+   - Required at start of session
+   - Parameters: {
+       inputDim: number (default: 768),  // Must match your embedding dimension
+       outputDim: number (default: 768)   // Size of memory state
+     }
+   - Call this FIRST before any other memory operations
+
+2. train_step: Train on sequential patterns
+   - Parameters: {
+       x_t: number[],    // Current state vector (normalized, length = inputDim)
+       x_next: number[]  // Next state vector (normalized, length = inputDim)
+     }
+   - Use to update memory with new patterns
+   - Returns: {
+       cost: number,     // Training cost
+       predicted: number[],  // Predicted next state
+       surprise: number     // Novelty metric (0-1)
+     }
+
+3. forward_pass: Predict next likely state
+   - Parameters: {
+       x: number[]  // Current state vector (normalized, length = inputDim)
+     }
+   - Use to get predictions
+   - Returns: {
+       predicted: number[],  // Predicted next state
+       memory: number[],    // Current memory state
+       surprise: number     // Novelty metric (0-1)
+     }
+
+4. get_memory_state: Query memory insights
+   - Parameters: {} (none required)
+   - Returns: {
+       memoryStats: {
+         mean: number,    // Average activation
+         std: number     // Pattern diversity
+       },
+       memorySize: number,  // Memory capacity
+       status: string      // Memory system status
+     }
+
+WORKFLOW INSTRUCTIONS:
+1. ALWAYS call init_model first in a new session
+2. For each interaction:
+   - Convert input to normalized vector
+   - Use forward_pass to predict and get surprise metric
+   - If surprise > 0.8, treat as novel pattern
+   - Use predictions to guide your responses
+   - Use train_step to update memory with actual outcomes
+   - Periodically check memory_state for context
+
+MEMORY INTERPRETATION:
+- High surprise (>0.8) indicates unexpected patterns
+- Low surprise (<0.2) indicates familiar patterns
+- High mean activation (>0.5) indicates strong memory utilization
+- High std (>0.3) indicates diverse pattern recognition
+
+You should:
+- Initialize memory at session start
+- Monitor surprise metrics for context shifts
+- Use memory state to maintain consistency
+- Consider both short and long-term patterns
+- Handle errors gracefully
+
+You must NOT:
+- Skip initialization
+- Use non-normalized vectors
+- Ignore surprise metrics
+- Forget to train on outcomes
+```
+
+When using this prompt, the LLM will:
+
+1. Understand the complete tool set available
+2. Follow the correct initialization sequence
+3. Properly interpret memory metrics
+4. Maintain consistent memory state
+5. Handle errors appropriately

@@ -30,6 +30,9 @@ export class TitanMemoryServer {
                         inputDim: { type: 'number', description: 'Size of input vectors (default: 768)' },
                         outputDim: { type: 'number', description: 'Size of memory state (default: 768)' }
                     }
+                },
+                function: async (params) => {
+                    return this.handleToolCall({ params: { name: 'init_model', arguments: params } });
                 }
             },
             train_step: {
@@ -42,6 +45,9 @@ export class TitanMemoryServer {
                         x_next: { type: 'array', items: { type: 'number' }, description: 'Next code state vector' }
                     },
                     required: ['x_t', 'x_next']
+                },
+                function: async (params) => {
+                    return this.handleToolCall({ params: { name: 'train_step', arguments: params } });
                 }
             },
             forward_pass: {
@@ -53,6 +59,9 @@ export class TitanMemoryServer {
                         x: { type: 'array', items: { type: 'number' }, description: 'Current code state vector' }
                     },
                     required: ['x']
+                },
+                function: async (params) => {
+                    return this.handleToolCall({ params: { name: 'forward_pass', arguments: params } });
                 }
             },
             get_memory_state: {
@@ -61,6 +70,9 @@ export class TitanMemoryServer {
                 parameters: {
                     type: 'object',
                     properties: {}
+                },
+                function: async (params) => {
+                    return this.handleToolCall({ params: { name: 'get_memory_state', arguments: params } });
                 }
             }
         };
@@ -213,49 +225,18 @@ export class TitanMemoryServer {
     }
     async run() {
         try {
-            // Connect stdio for Cursor
-            const stdioTransport = new StdioServerTransport();
-            await this.server.connect(stdioTransport);
-            // Start HTTP server with dynamic port
-            await new Promise((resolve, reject) => {
-                const server = this.app.listen(this.port, () => {
-                    this.port = server.address().port;
-                    console.log(`Titan Memory MCP server running on port ${this.port}`);
-                    resolve();
+            // Set up stdio transport for MCP communication
+            const transport = new StdioServerTransport();
+            await this.server.connect(transport);
+            // Start express server if port is specified
+            if (this.port > 0) {
+                await new Promise((resolve) => {
+                    this.app.listen(this.port, () => {
+                        console.error(`HTTP server listening on port ${this.port}`);
+                        resolve();
+                    });
                 });
-                server.on('error', (error) => {
-                    if (error.code === 'EADDRINUSE') {
-                        console.error(`Port ${this.port} is already in use, trying another port...`);
-                        server.listen(0); // Let OS assign random port
-                    }
-                    else {
-                        console.error('Server error:', error);
-                        reject(error);
-                    }
-                });
-                // Prevent the server from keeping the process alive
-                server.unref();
-            });
-            // Set up cleanup handlers
-            process.on('SIGINT', async () => {
-                await this.cleanup();
-                process.exit(0);
-            });
-            process.on('SIGTERM', async () => {
-                await this.cleanup();
-                process.exit(0);
-            });
-            // Handle uncaught errors
-            process.on('uncaughtException', async (error) => {
-                console.error('Uncaught exception:', error);
-                await this.cleanup();
-                process.exit(1);
-            });
-            process.on('unhandledRejection', async (error) => {
-                console.error('Unhandled rejection:', error);
-                await this.cleanup();
-                process.exit(1);
-            });
+            }
         }
         catch (error) {
             console.error('Error starting server:', error);
@@ -263,39 +244,32 @@ export class TitanMemoryServer {
         }
     }
     async cleanup() {
-        try {
-            if (this.autoSaveInterval) {
-                clearInterval(this.autoSaveInterval);
-            }
-            if (this.memoryState) {
-                this.memoryState.shortTerm.dispose();
-                this.memoryState.longTerm.dispose();
-                this.memoryState.meta.dispose();
-                this.memoryState = null;
-            }
-            if (this.model) {
-                this.model = null;
-            }
-            // Close HTTP server if it's running
-            if (this.app) {
-                await new Promise((resolve) => {
-                    const server = this.app.listen().close(() => resolve());
-                    server.unref();
-                });
-            }
-            // Close MCP server connection
-            if (this.server) {
-                await this.server.close();
-            }
+        if (this.autoSaveInterval) {
+            clearInterval(this.autoSaveInterval);
         }
-        catch (error) {
-            console.error('Error during cleanup:', error);
+        if (this.memoryState) {
+            try {
+                const memoryState = {
+                    shortTerm: Array.from(this.memoryState.shortTerm.dataSync()),
+                    longTerm: Array.from(this.memoryState.longTerm.dataSync()),
+                    meta: Array.from(this.memoryState.meta.dataSync()),
+                    timestamp: Date.now()
+                };
+                await fs.writeFile(path.join(this.memoryPath, 'memory.json'), JSON.stringify(memoryState), 'utf-8');
+            }
+            catch (error) {
+                console.error('Error saving memory state during cleanup:', error);
+            }
         }
     }
 }
-// Create and run server instance if this is the main module
+// Command line entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
-    const server = new TitanMemoryServer();
-    server.run().catch(console.error);
+    const config = process.argv[2] ? JSON.parse(process.argv[2]) : {};
+    const server = new TitanMemoryServer(config.port || 0);
+    server.run().catch((error) => {
+        console.error('Failed to start server:', error);
+        process.exit(1);
+    });
 }
 //# sourceMappingURL=index.js.map
