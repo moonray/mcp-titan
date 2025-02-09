@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import '@tensorflow/tfjs-node';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import * as tf from '@tensorflow/tfjs';
 import { TitanMemoryModel } from './model.js';
+import { IMemoryState } from './types.js';
 export declare class TitanMemoryServer {
     protected server: Server;
     protected model: TitanMemoryModel | null;
-    protected memoryVec: tf.Variable | null;
+    protected memoryState: IMemoryState | null;
     private app;
     private port;
     private memoryPath;
