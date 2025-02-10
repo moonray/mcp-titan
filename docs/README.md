@@ -51,6 +51,7 @@ graph TD
     B --> E[HTTP API]
     C --> F[Persistent Storage]
 ```
+The server automatically saves the memory state every 5 minutes, and it's initialized with zeros when first created. The memory vectors are 768-dimensional by default, which is a common size for language model embeddings.
 
 ### Getting Help
 

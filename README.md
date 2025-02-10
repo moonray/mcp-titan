@@ -1,12 +1,9 @@
-# 🧠 MCP Titan - An Advanced Memory Server
-
+#I'm having a hard time getting this whole MCP server to work with Cursor. I'm not sure why. If anyone has any suggestions, please let me know.
 [![smithery badge](https://smithery.ai/badge/@henryhawke/mcp-titan)](https://smithery.ai/server/@henryhawke/mcp-titan)
 
 An implementation inspired by Google Research's paper ["Generative AI for Programming: A Common Task Framework"](https://arxiv.org/abs/2501.00663). This server provides a neural memory system that can learn and predict sequences while maintaining state through a memory vector, following principles outlined in the research for improved code generation and understanding.
 
 ## 📚 Research Background
-
-
 
 This implementation draws from the concepts presented in the Google Research paper (Muennighoff et al., 2024) which introduces a framework for evaluating and improving code generation models. The Titan Memory Server implements key concepts from the paper:
 
@@ -605,3 +602,57 @@ When using this prompt, the LLM will:
 3. Properly interpret memory metrics
 4. Maintain consistent memory state
 5. Handle errors appropriately
+
+## 🔍 Testing with MCP Inspector
+
+You can test the Titan Memory server using the MCP Inspector tool:
+
+```bash
+# Install and run the inspector
+npx @modelcontextprotocol/inspector node build/index.js
+```
+
+The inspector will be available at http://localhost:5173. You can use it to:
+
+- Test all available tools
+- View tool schemas and descriptions
+- Monitor memory state
+- Debug tool calls
+- Verify server responses
+
+### Testing Steps
+
+1. Build the project first:
+
+   ```bash
+   npm run build
+   ```
+
+2. Make sure the build/index.js file is executable:
+
+   ```bash
+   chmod +x build/index.js
+   ```
+
+3. Run the inspector:
+
+   ```bash
+   npx @modelcontextprotocol/inspector node build/index.js
+   ```
+
+4. Open http://localhost:5173 in your browser
+
+5. Test the tools in sequence:
+   - Initialize model with `init_model`
+   - Train with sample data using `train_step`
+   - Test predictions with `forward_pass`
+   - Monitor memory state with `get_memory_state`
+
+### Troubleshooting Inspector
+
+If you encounter issues:
+
+1. Ensure Node.js version >= 18.0.0
+2. Verify the build is up to date
+3. Check file permissions
+4. Monitor the terminal for error messages

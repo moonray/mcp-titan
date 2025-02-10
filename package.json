@@ -1,6 +1,6 @@
 {
   "name": "@henryhawke/mcp-titan",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A Model Context Protocol server with enhanced Titan Memory implementation",
   "type": "module",
   "main": "build/index.js",
