@@ -5,14 +5,14 @@
  * model interactions.
  */
 
-import * as tf from '@tensorflow/tfjs';
+import * as tf from '@tensorflow/tfjs-node';
 import { z } from "zod";
 
 /**
  * Basic interface for an in-house tensor object that wraps TensorFlow.js tensors.
  * Provides essential operations while maintaining compatibility with tf.TensorContainerObject.
  */
-export interface ITensor extends tf.TensorContainerObject {
+export interface ITensor {
   /** Returns the raw data */
   dataSync(): Float32Array | Int32Array | Uint8Array;
   /** Releases the memory associated with this tensor */
@@ -21,6 +21,7 @@ export interface ITensor extends tf.TensorContainerObject {
   shape: number[];
   /** Additional properties required for TensorContainerObject compatibility */
   [key: string]: any;
+  data: tf.Tensor;
 }
 
 /**
@@ -222,6 +223,13 @@ export interface IMemoryModel {
    * Returns current model configuration.
    */
   getConfig(): any;
+
+  /**
+   * Saves the entire model to disk.
+   * @param modelPath Path to save the model
+   * @param weightsPath Path to save the model weights
+   */
+  save(modelPath: string, weightsPath: string): Promise<void>;
 }
 
 /**
@@ -255,6 +263,8 @@ export class TensorWrapper implements ITensor {
       shape: this.shape
     };
   }
+
+  data: tf.Tensor;
 }
 
 /**
@@ -263,7 +273,12 @@ export class TensorWrapper implements ITensor {
  * @returns Wrapped tensor
  */
 export function wrapTensor(tensor: tf.Tensor): ITensor {
-  return TensorWrapper.fromTensor(tensor);
+  return {
+    data: tensor,
+    dispose: () => tensor.dispose(),
+    dataSync: () => tensor.dataSync(),
+    shape: tensor.shape
+  };
 }
 
 /**
@@ -273,10 +288,7 @@ export function wrapTensor(tensor: tf.Tensor): ITensor {
  * @throws Error if tensor is not a TensorWrapper
  */
 export function unwrapTensor(tensor: ITensor): tf.Tensor {
-  if (tensor instanceof TensorWrapper) {
-    return (tensor as any).tensor;
-  }
-  throw new Error('Cannot unwrap non-TensorWrapper object');
+  return tensor.data;
 }
 
 /**

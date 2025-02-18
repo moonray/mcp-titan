@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 import '@tensorflow/tfjs-node';  // Import and register the Node.js backend
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, CallToolResultSchema, ServerCapabilities } from '@modelcontextprotocol/sdk/types.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import * as tf from '@tensorflow/tfjs-node';
+import { Server, ServerCapabilities } from '@modelcontextprotocol/sdk/server/index.js';
+import { WebSocketServerTransport } from '@modelcontextprotocol/sdk/server/websocket.js';
+import { CallToolRequestSchema, CallToolResultSchema } from '@modelcontextprotocol/sdk/schema.js';
 import express from 'express';
 import bodyParser from 'body-parser';
-import * as tf from '@tensorflow/tfjs';
-import { TitanMemoryModel } from './model.js';
-import { wrapTensor, unwrapTensor, ITensor, IMemoryState } from './types.js';
-import path from 'path';
-import os from 'os';
-import fs from 'fs/promises';
-import { WebSocketServerTransport } from '@modelcontextprotocol/sdk/server/websocket.js';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs/promises';
 import WebSocket from 'ws';
+import { TitanMemoryModel } from './model.js';
+import { IMemoryState, wrapTensor, unwrapTensor } from './types.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 interface TitanMemoryTools {
   init_model: {
@@ -29,6 +29,15 @@ interface TitanMemoryTools {
   get_memory_state: Record<string, never>;
 }
 
+interface TitanMemoryConfig {
+  port?: number;
+  memoryPath?: string;
+  modelPath?: string;
+  weightsPath?: string;
+  inputDim?: number;
+  outputDim?: number;
+}
+
 export class TitanMemoryServer {
   protected server: Server;
   protected model: TitanMemoryModel | null = null;
@@ -36,6 +45,8 @@ export class TitanMemoryServer {
   private app: express.Application;
   private port: number;
   private memoryPath: string;
+  private modelPath: string;
+  private weightsPath: string;
   private autoSaveInterval: NodeJS.Timeout | null = null;
   private reconnectAttempts: number = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
@@ -45,16 +56,20 @@ export class TitanMemoryServer {
   private readonly AUTO_RECONNECT_INTERVAL = 5000;
   private isAutoReconnectEnabled = true;
 
-  constructor(port: number = 0) {
-    this.port = port;
+  constructor(config: TitanMemoryConfig = {}) {
+    this.port = config.port || 0;
     this.app = express();
     this.app.use(bodyParser.json());
 
-    // Use a more robust path for memory storage
-    this.memoryPath = path.join(
+    // Use custom memory path or default
+    this.memoryPath = config.memoryPath || path.join(
       os.platform() === 'win32' ? process.env.APPDATA || os.homedir() : os.homedir(),
       '.mcp-titan'
     );
+
+    // Set model and weights paths
+    this.modelPath = config.modelPath || path.join(this.memoryPath, 'model.json');
+    this.weightsPath = config.weightsPath || path.join(this.memoryPath, 'weights');
 
     const tools = {
       init_model: {
@@ -164,28 +179,34 @@ export class TitanMemoryServer {
     });
   }
 
-  private async setupWebSocket() {
-    if (!this.wsServer) {
-      const wsPort = this.port || this.DEFAULT_WS_PORT;
-      this.wsServer = new WebSocket.Server({ port: wsPort });
-
-      this.wsServer.on('connection', async (ws) => {
-        try {
-          const transport = new WebSocketServerTransport(ws);
-          await this.server.connect(transport);
-          console.error(`WebSocket client connected on port ${wsPort}`);
-        } catch (error) {
-          console.error('WebSocket connection error:', error);
-        }
-      });
-
-      this.wsServer.on('error', (error) => {
-        console.error('WebSocket server error:', error);
-        if (this.isAutoReconnectEnabled) {
-          setTimeout(() => this.setupWebSocket(), this.AUTO_RECONNECT_INTERVAL);
-        }
-      });
+  private setupWebSocket(): void {
+    if (this.wsServer) {
+      this.wsServer.close();
     }
+
+    this.wsServer = new WebSocket.Server({ port: this.DEFAULT_WS_PORT });
+
+    this.wsServer.on('connection', (ws: WebSocket) => {
+      console.log('New WebSocket connection established');
+
+      ws.on('message', async (message: WebSocket.Data) => {
+        try {
+          // Handle WebSocket messages
+          const data = JSON.parse(message.toString());
+          // Process data...
+        } catch (error) {
+          console.error('Error processing WebSocket message:', error);
+          ws.send(JSON.stringify({ error: 'Failed to process message' }));
+        }
+      });
+    });
+
+    this.wsServer.on('error', (error: Error) => {
+      console.error('WebSocket server error:', error);
+      if (this.isAutoReconnectEnabled) {
+        setTimeout(() => this.setupWebSocket(), this.AUTO_RECONNECT_INTERVAL);
+      }
+    });
   }
 
   private async autoInitialize() {
@@ -193,12 +214,21 @@ export class TitanMemoryServer {
       // Ensure memory directory exists
       await fs.mkdir(this.memoryPath, { recursive: true });
 
+      // Ensure weights directory exists
+      await fs.mkdir(this.weightsPath, { recursive: true });
+
       // Initialize model if needed
       if (!this.model) {
-        this.model = new TitanMemoryModel({ inputDim: 768, outputDim: 768 });
+        const modelConfig = {
+          inputDim: 768,
+          outputDim: 768,
+          modelPath: this.modelPath,
+          weightsPath: this.weightsPath
+        };
+        this.model = new TitanMemoryModel(modelConfig);
 
         // Initialize memory state
-        const zeros = tf.zeros([768]);
+        const zeros = tf.zeros([modelConfig.outputDim]);
         this.memoryState = {
           shortTerm: wrapTensor(zeros),
           longTerm: wrapTensor(zeros.clone()),
@@ -214,22 +244,24 @@ export class TitanMemoryServer {
       if (!this.autoSaveInterval) {
         this.autoSaveInterval = setInterval(async () => {
           await this.saveMemoryState();
-        }, 5 * 60 * 1000);
+        }, 5 * 60 * 1000); // Every 5 minutes
         this.autoSaveInterval.unref();
       }
 
       // Setup WebSocket server
       await this.setupWebSocket();
     } catch (error) {
-      console.error('Auto-initialization failed:', error);
-      throw error;
+      console.error('Error in autoInitialize:', error);
+      throw new Error(`Failed to initialize memory system: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
   private async loadSavedState() {
     try {
       const statePath = path.join(this.memoryPath, 'memory.json');
-      const exists = await fs.access(statePath).then(() => true).catch(() => false);
+      const exists = await fs.access(statePath)
+        .then(() => true)
+        .catch(() => false);
 
       if (exists) {
         const savedState = JSON.parse(await fs.readFile(statePath, 'utf-8'));
@@ -243,6 +275,7 @@ export class TitanMemoryServer {
       }
     } catch (error) {
       console.error('Error loading saved state:', error);
+      // Don't throw - continue with fresh state
     }
   }
 
@@ -255,11 +288,18 @@ export class TitanMemoryServer {
           meta: Array.from(this.memoryState.meta.dataSync()),
           timestamp: Date.now()
         };
+
+        // Save memory state
         await fs.writeFile(
           path.join(this.memoryPath, 'memory.json'),
           JSON.stringify(memoryState),
           'utf-8'
         );
+
+        // Save model state if available
+        if (this.model) {
+          await this.model.save(this.modelPath, this.weightsPath);
+        }
       } catch (error) {
         console.error('Error saving memory state:', error);
       }
@@ -409,7 +449,14 @@ export class TitanMemoryServer {
 // Command line entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
   const config = process.argv[2] ? JSON.parse(process.argv[2]) : {};
-  const server = new TitanMemoryServer(config.port || 0);
+  const server = new TitanMemoryServer({
+    port: config.port || 0,
+    memoryPath: config.memoryPath,
+    modelPath: config.modelPath,
+    weightsPath: config.weightsPath,
+    inputDim: config.inputDim,
+    outputDim: config.outputDim
+  });
 
   // Handle process signals
   process.on('SIGINT', async () => {
