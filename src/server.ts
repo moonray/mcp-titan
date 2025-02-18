@@ -3,10 +3,10 @@ import bodyParser from 'body-parser';
 import * as tf from '@tensorflow/tfjs';
 import { TitanMemoryModel } from './model.js';
 import { wrapTensor } from './types.js';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, CallToolResultSchema, ServerCapabilities } from '@modelcontextprotocol/sdk/types.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { Server, ServerCapabilities, CallToolRequest, CallToolResult, Transport } from './types.js';
+import WebSocket from 'ws';
 import { Request, Response } from 'express';
+import { z } from 'zod';
 
 interface ToolHandlers {
   storeMemory: {
@@ -17,6 +17,183 @@ interface ToolHandlers {
   recallMemory: {
     query: string;
   };
+}
+
+// Schema definitions
+const CallToolRequestSchema = z.object({
+  name: z.string(),
+  parameters: z.record(z.unknown())
+});
+
+const CallToolResultSchema = z.object({
+  success: z.boolean(),
+  result: z.unknown().optional(),
+  error: z.string().optional()
+});
+
+export class MCPServer implements Server {
+  public name: string;
+  public version: string;
+  public capabilities: ServerCapabilities;
+  private errorHandler: ((error: Error) => void) | null = null;
+  private requestHandler?: (request: CallToolRequest) => Promise<CallToolResult>;
+
+  constructor(name: string, version: string, capabilities: ServerCapabilities) {
+    this.name = name;
+    this.version = version;
+    this.capabilities = capabilities;
+  }
+
+  onError(handler: (error: Error) => void): void {
+    this.errorHandler = handler;
+  }
+
+  onToolCall(handler: (request: CallToolRequest) => Promise<CallToolResult>): void {
+    this.requestHandler = handler;
+  }
+
+  async connect(transport: Transport): Promise<void> {
+    await transport.connect();
+  }
+
+  handleError(error: Error): void {
+    if (this.errorHandler) {
+      this.errorHandler(error);
+    } else {
+      console.error('Unhandled server error:', error);
+    }
+  }
+
+  async handleRequest(request: CallToolRequest): Promise<CallToolResult> {
+    if (!this.requestHandler) {
+      return {
+        success: false,
+        error: 'No request handler registered'
+      };
+    }
+
+    try {
+      // Validate request
+      const validatedRequest = CallToolRequestSchema.parse(request);
+      return await this.requestHandler(validatedRequest);
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred'
+      };
+    }
+  }
+
+  public setRequestHandler(handler: (request: CallToolRequest) => Promise<CallToolResult>) {
+    this.requestHandler = handler;
+  }
+}
+
+export class WebSocketTransport implements Transport {
+  private ws: WebSocket;
+  private requestHandler?: (request: CallToolRequest) => Promise<CallToolResult>;
+
+  constructor(url: string) {
+    this.ws = new WebSocket(url);
+  }
+
+  public async connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.ws.onopen = () => resolve();
+      this.ws.onerror = (error) => reject(error);
+
+      this.ws.onmessage = async (event) => {
+        if (!this.requestHandler) return;
+
+        try {
+          const request = JSON.parse(event.data.toString());
+          const validatedRequest = CallToolRequestSchema.parse(request);
+          const response = await this.requestHandler(validatedRequest);
+          this.ws.send(JSON.stringify(response));
+        } catch (error) {
+          this.ws.send(JSON.stringify({
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+          }));
+        }
+      };
+    });
+  }
+
+  public async disconnect(): Promise<void> {
+    this.ws.close();
+    return Promise.resolve();
+  }
+
+  public onRequest(handler: (request: CallToolRequest) => Promise<CallToolResult>): void {
+    this.requestHandler = handler;
+  }
+}
+
+export class StdioTransport implements Transport {
+  private requestHandler?: (request: CallToolRequest) => Promise<CallToolResult>;
+  private readline = require('readline').createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  public async connect(): Promise<void> {
+    this.readline.on('line', async (line: string) => {
+      if (!this.requestHandler) return;
+
+      try {
+        const request = JSON.parse(line);
+        const validatedRequest = CallToolRequestSchema.parse(request);
+        const response = await this.requestHandler(validatedRequest);
+        console.log(JSON.stringify(response));
+      } catch (error) {
+        console.log(JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : 'Unknown error occurred'
+        }));
+      }
+    });
+
+    return Promise.resolve();
+  }
+
+  public async disconnect(): Promise<void> {
+    this.readline.close();
+    return Promise.resolve();
+  }
+
+  public onRequest(handler: (request: CallToolRequest) => Promise<CallToolResult>): void {
+    this.requestHandler = handler;
+  }
+}
+
+export class StdioServerTransportImpl implements Transport {
+  private requestHandler?: (request: CallToolRequest) => Promise<CallToolResult>;
+
+  public onRequest(handler: (request: CallToolRequest) => Promise<CallToolResult>): void {
+    this.requestHandler = handler;
+  }
+
+  async connect(): Promise<void> {
+    // Setup stdin/stdout handlers
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', this.handleInput.bind(this));
+  }
+
+  async disconnect(): Promise<void> {
+    process.stdin.removeAllListeners('data');
+  }
+
+  private handleInput(data: string): void {
+    if (!this.requestHandler) return;
+    try {
+      const message = JSON.parse(data);
+      // Handle message...
+      process.stdout.write(JSON.stringify({ type: 'response', data: message }) + '\n');
+    } catch (error) {
+      process.stderr.write(`Error handling input: ${error}\n`);
+    }
+  }
 }
 
 export class TitanExpressServer {
@@ -32,53 +209,16 @@ export class TitanExpressServer {
     this.setupMiddleware();
     this.setupRoutes();
 
-    const tools = {
-      storeMemory: {
-        name: 'storeMemory',
-        description: 'Stores information in the knowledge graph',
-        parameters: {
-          type: 'object',
-          properties: {
-            subject: { type: 'string' },
-            relationship: { type: 'string' },
-            object: { type: 'string' }
-          },
-          required: ['subject', 'relationship', 'object']
-        }
-      },
-      recallMemory: {
-        name: 'recallMemory',
-        description: 'Recalls information from the knowledge graph',
-        parameters: {
-          type: 'object',
-          properties: {
-            query: { type: 'string' }
-          },
-          required: ['query']
-        }
-      }
-    };
-
     const capabilities: ServerCapabilities = {
-      tools: {
-        listChanged: true,
-        list: tools,
-        call: {
-          enabled: true,
-          schemas: {
-            request: CallToolRequestSchema,
-            result: CallToolResultSchema
-          }
-        }
-      }
+      tools: true,
+      memory: true
     };
 
-    this.server = new Server({
-      name: 'titan-express',
-      version: '0.1.0',
-      description: 'Titan Memory Express Server',
+    this.server = new MCPServer(
+      'titan-express',
+      '0.1.0',
       capabilities
-    });
+    );
 
     this.setupHandlers();
   }
@@ -88,37 +228,36 @@ export class TitanExpressServer {
   }
 
   private setupHandlers() {
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.handleRequest = async (request: CallToolRequest): Promise<CallToolResult> => {
       try {
-        switch (request.params.name) {
+        switch (request.name) {
           case 'storeMemory': {
-            const { subject, relationship, object } = request.params.arguments as ToolHandlers['storeMemory'];
+            const { subject, relationship, object } = request.parameters as ToolHandlers['storeMemory'];
             // Implementation
             return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify({ stored: true })
-              }]
+              success: true,
+              result: { stored: true }
             };
           }
           case 'recallMemory': {
-            const { query } = request.params.arguments as ToolHandlers['recallMemory'];
+            const { query } = request.parameters as ToolHandlers['recallMemory'];
             // Implementation
             return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify({ results: [] })
-              }]
+              success: true,
+              result: { results: [] }
             };
           }
           default:
-            throw new Error(`Unknown tool: ${request.params.name}`);
+            throw new Error(`Unknown tool: ${request.name}`);
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-        throw new Error(`Error: ${errorMessage}`);
+        return {
+          success: false,
+          error: `Error: ${errorMessage}`
+        };
       }
-    });
+    };
   }
 
   private setupRoutes() {
@@ -126,13 +265,14 @@ export class TitanExpressServer {
       res.json({
         status: 'ok',
         model: this.model ? 'initialized' : 'not initialized'
+
       });
     });
   }
 
   public async start(): Promise<void> {
     // Connect stdio transport
-    const stdioTransport = new StdioServerTransport();
+    const stdioTransport = new StdioServerTransportImpl();
     await this.server.connect(stdioTransport);
 
     // Start HTTP server

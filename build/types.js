@@ -38,7 +38,12 @@ export class TensorWrapper {
  * @returns Wrapped tensor
  */
 export function wrapTensor(tensor) {
-    return TensorWrapper.fromTensor(tensor);
+    return {
+        data: tensor,
+        dispose: () => tensor.dispose(),
+        dataSync: () => tensor.dataSync(),
+        shape: tensor.shape
+    };
 }
 /**
  * Unwraps a tensor to get the underlying TensorFlow.js tensor.
@@ -47,10 +52,7 @@ export function wrapTensor(tensor) {
  * @throws Error if tensor is not a TensorWrapper
  */
 export function unwrapTensor(tensor) {
-    if (tensor instanceof TensorWrapper) {
-        return tensor.tensor;
-    }
-    throw new Error('Cannot unwrap non-TensorWrapper object');
+    return tensor.data;
 }
 /**
  * Zod schema for memory storage input validation.

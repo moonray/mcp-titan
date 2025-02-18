@@ -4,13 +4,13 @@
  * of the Titans memory model, including tensor operations, memory states, and
  * model interactions.
  */
-import * as tf from '@tensorflow/tfjs';
+import * as tf from '@tensorflow/tfjs-node';
 import { z } from "zod";
 /**
  * Basic interface for an in-house tensor object that wraps TensorFlow.js tensors.
  * Provides essential operations while maintaining compatibility with tf.TensorContainerObject.
  */
-export interface ITensor extends tf.TensorContainerObject {
+export interface ITensor {
     /** Returns the raw data */
     dataSync(): Float32Array | Int32Array | Uint8Array;
     /** Releases the memory associated with this tensor */
@@ -19,6 +19,7 @@ export interface ITensor extends tf.TensorContainerObject {
     shape: number[];
     /** Additional properties required for TensorContainerObject compatibility */
     [key: string]: any;
+    data: tf.Tensor;
 }
 /**
  * Interface defining the core tensor operations available in the system.
@@ -210,6 +211,12 @@ export interface IMemoryModel {
      * Returns current model configuration.
      */
     getConfig(): any;
+    /**
+     * Saves the entire model to disk.
+     * @param modelPath Path to save the model
+     * @param weightsPath Path to save the model weights
+     */
+    save(modelPath: string, weightsPath: string): Promise<void>;
 }
 /**
  * Wrapper class for TensorFlow.js tensors.
@@ -224,6 +231,7 @@ export declare class TensorWrapper implements ITensor {
     dataSync(): Float32Array | Int32Array | Uint8Array;
     dispose(): void;
     toJSON(): any;
+    data: tf.Tensor;
 }
 /**
  * Creates a wrapped tensor from a TensorFlow.js tensor.

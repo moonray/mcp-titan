@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 import '@tensorflow/tfjs-node';  // Import and register the Node.js backend
 import * as tf from '@tensorflow/tfjs-node';
-import { Server, ServerCapabilities } from '@modelcontextprotocol/sdk/server/index.js';
-import { WebSocketServerTransport } from '@modelcontextprotocol/sdk/server/websocket.js';
-import { CallToolRequestSchema, CallToolResultSchema } from '@modelcontextprotocol/sdk/schema.js';
 import express from 'express';
 import bodyParser from 'body-parser';
 import * as path from 'path';
@@ -11,24 +8,56 @@ import * as os from 'os';
 import * as fs from 'fs/promises';
 import WebSocket from 'ws';
 import { TitanMemoryModel } from './model.js';
-import { IMemoryState, wrapTensor, unwrapTensor } from './types.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  IMemoryState,
+  wrapTensor,
+  unwrapTensor,
+  ServerCapabilities,
+  CallToolRequest,
+  CallToolResult,
+  Server,
+  Transport
+} from './types.js';
+import { MCPServer, WebSocketTransport, StdioServerTransportImpl } from './server.js';
+import { StdioTransport } from './transports.js';
 
-interface TitanMemoryTools {
-  init_model: {
-    inputDim?: number;
-    outputDim?: number;
+import { z } from 'zod';
+
+// Tool interfaces
+interface ToolParameter {
+  type: string;
+  description?: string;
+  items?: {
+    type: string;
   };
-  train_step: {
-    x_t: number[];
-    x_next: number[];
-  };
-  forward_pass: {
-    x: number[];
-  };
-  get_memory_state: Record<string, never>;
 }
 
+interface ToolParameters {
+  type: string;
+  properties: Record<string, ToolParameter>;
+  required?: string[];
+}
+
+interface Tool {
+  name: string;
+  description: string;
+  parameters: ToolParameters;
+}
+
+interface TitanMemoryTools {
+  init_model: Tool;
+  train_step: Tool;
+  forward_pass: Tool;
+  get_memory_state: Tool;
+}
+
+// Error handler interface
+interface MCPError {
+  message: string;
+  code: string;
+}
+
+// Memory configuration interface
 interface TitanMemoryConfig {
   port?: number;
   memoryPath?: string;
@@ -38,17 +67,85 @@ interface TitanMemoryConfig {
   outputDim?: number;
 }
 
+// Request handler interface
+interface ToolCallRequest extends CallToolRequest {
+  params: Record<string, unknown>;
+}
+
+// Result interface
+interface ToolCallResult extends Omit<CallToolResult, 'error'> {
+  error?: string;
+}
+
+const MCPErrorSchema = z.object({
+  message: z.string(),
+  code: z.string()
+});
+
+export class TitanServer implements Server {
+  public capabilities: ServerCapabilities = {
+    tools: true,
+    memory: true
+  };
+
+  private transport: WebSocketTransport | StdioTransport;
+
+  constructor(transport: WebSocketTransport | StdioTransport) {
+    this.transport = transport;
+  }
+
+  async connect(transport: Transport): Promise<void> {
+    await transport.connect();
+  }
+
+  async start(): Promise<void> {
+    await this.transport.connect();
+    this.transport.onRequest(this.handleRequest.bind(this));
+  }
+
+  async stop(): Promise<void> {
+    await this.transport.disconnect();
+  }
+
+  async handleRequest(request: CallToolRequest): Promise<CallToolResult> {
+    try {
+      const result = await this.processRequest(request);
+      return {
+        success: true,
+        result
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred'
+      };
+    }
+  }
+
+  private async processRequest(request: CallToolRequest): Promise<unknown> {
+    switch (request.name) {
+      case 'storeMemory':
+        return { stored: true };
+      case 'recallMemory':
+        return { recalled: true };
+      default:
+        throw new Error(`Unknown tool: ${request.name}`);
+    }
+  }
+}
+
 export class TitanMemoryServer {
-  protected server: Server;
-  protected model: TitanMemoryModel | null = null;
-  protected memoryState: IMemoryState | null = null;
+  private model!: TitanMemoryModel;
+  private server: MCPServer;
+  private tools: TitanMemoryTools;
+  private memoryState!: IMemoryState;
   private app: express.Application;
   private port: number;
   private memoryPath: string;
   private modelPath: string;
   private weightsPath: string;
   private autoSaveInterval: NodeJS.Timeout | null = null;
-  private reconnectAttempts: number = 0;
+  private reconnectAttempts = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
   private readonly RECONNECT_DELAY = 5000;
   private wsServer: WebSocket.Server | null = null;
@@ -58,177 +155,220 @@ export class TitanMemoryServer {
 
   constructor(config: TitanMemoryConfig = {}) {
     this.port = config.port || 0;
-    this.app = express();
-    this.app.use(bodyParser.json());
-
-    // Use custom memory path or default
     this.memoryPath = config.memoryPath || path.join(
       os.platform() === 'win32' ? process.env.APPDATA || os.homedir() : os.homedir(),
       '.mcp-titan'
     );
-
-    // Set model and weights paths
     this.modelPath = config.modelPath || path.join(this.memoryPath, 'model.json');
     this.weightsPath = config.weightsPath || path.join(this.memoryPath, 'weights');
 
-    const tools = {
-      init_model: {
-        name: 'init_model',
-        description: 'Initialize the Titan Memory model for learning code patterns',
-        parameters: {
-          type: 'object',
-          properties: {
-            inputDim: { type: 'number', description: 'Size of input vectors (default: 768)' },
-            outputDim: { type: 'number', description: 'Size of memory state (default: 768)' }
-          }
-        },
-        function: async (params: any) => {
-          return this.handleToolCall({ params: { name: 'init_model', arguments: params } });
-        }
-      },
-      train_step: {
-        name: 'train_step',
-        description: 'Train the model on a sequence of code to improve pattern recognition',
-        parameters: {
-          type: 'object',
-          properties: {
-            x_t: { type: 'array', items: { type: 'number' }, description: 'Current code state vector' },
-            x_next: { type: 'array', items: { type: 'number' }, description: 'Next code state vector' }
-          },
-          required: ['x_t', 'x_next']
-        },
-        function: async (params: any) => {
-          return this.handleToolCall({ params: { name: 'train_step', arguments: params } });
-        }
-      },
-      forward_pass: {
-        name: 'forward_pass',
-        description: 'Predict the next likely code pattern based on current input',
-        parameters: {
-          type: 'object',
-          properties: {
-            x: { type: 'array', items: { type: 'number' }, description: 'Current code state vector' }
-          },
-          required: ['x']
-        },
-        function: async (params: any) => {
-          return this.handleToolCall({ params: { name: 'forward_pass', arguments: params } });
-        }
-      },
-      get_memory_state: {
-        name: 'get_memory_state',
-        description: 'Get insights about what patterns the model has learned',
-        parameters: {
-          type: 'object',
-          properties: {}
-        },
-        function: async (params: any) => {
-          return this.handleToolCall({ params: { name: 'get_memory_state', arguments: params } });
-        }
-      }
+    this.app = express();
+    this.app.use(bodyParser.json());
+
+    this.tools = {
+      init_model: this.createInitModelTool(),
+      train_step: this.createTrainStepTool(),
+      forward_pass: this.createForwardPassTool(),
+      get_memory_state: this.createGetMemoryStateTool()
     };
 
-    const capabilities: ServerCapabilities = {
-      tools: {
-        list: tools,
-        call: {
-          request: CallToolRequestSchema,
-          result: CallToolResultSchema
-        },
-        listChanged: true
-      }
-    };
-
-    this.server = new Server({
-      name: 'mcp-titan',
-      version: '0.1.2',
-      description: 'AI-powered code memory that learns from your coding patterns to provide better suggestions and insights',
-      capabilities
+    this.server = new MCPServer('titan-memory', '1.0.0', {
+      tools: true,
+      memory: true
     });
 
-    // Enhanced error handler with reconnection logic
-    this.server.onerror = async (error) => {
-      console.error('[MCP Error]', error);
-      if (this.isAutoReconnectEnabled && this.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {
-        this.reconnectAttempts++;
-        console.error(`Attempting reconnection (${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})...`);
-        setTimeout(() => this.reconnect(), this.RECONNECT_DELAY);
-      }
-    };
+    this.setupErrorHandler();
+    this.setupToolHandler();
+    this.autoInitialize().catch(console.error);
+  }
 
-    // Register capabilities and handlers
-    this.server.registerCapabilities(capabilities);
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      try {
-        const result = await this.handleToolCall(request);
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify(result)
-          }]
-        };
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-        throw new Error(`Error handling tool call: ${errorMessage}`);
-      }
-    });
-
-    // Auto-initialize immediately
-    this.autoInitialize().catch(error => {
-      console.error('Auto-initialization failed:', error);
+  private setupErrorHandler(): void {
+    this.server.onError((error: Error) => {
+      console.error('Server error:', error);
     });
   }
 
-  private setupWebSocket(): void {
-    if (this.wsServer) {
-      this.wsServer.close();
+  private setupToolHandler(): void {
+    this.server.onToolCall(async (request: CallToolRequest): Promise<CallToolResult> => {
+      try {
+        const result = await this.handleToolCall(request as ToolCallRequest);
+        return { success: true, result };
+      } catch (error) {
+        const mcpError = error as Error;
+        return {
+          success: false,
+          error: mcpError.message
+        };
+      }
+    });
+  }
+
+  private async setupWebSocket(): Promise<void> {
+    const transport = new WebSocketTransport(this.port.toString());
+    await this.server.connect(transport);
+  }
+
+  private createInitModelTool(): Tool {
+    return {
+      name: 'init_model',
+      description: 'Initialize the Titan Memory model for learning code patterns',
+      parameters: {
+        type: 'object',
+        properties: {
+          inputDim: { type: 'number', description: 'Size of input vectors (default: 768)' },
+          outputDim: { type: 'number', description: 'Size of memory state (default: 768)' }
+        }
+      }
+    };
+  }
+
+  private createTrainStepTool(): Tool {
+    return {
+      name: 'train_step',
+      description: 'Train the model on a sequence of code to improve pattern recognition',
+      parameters: {
+        type: 'object',
+        properties: {
+          x_t: { type: 'array', items: { type: 'number' }, description: 'Current code state vector' },
+          x_next: { type: 'array', items: { type: 'number' }, description: 'Next code state vector' }
+        },
+        required: ['x_t', 'x_next']
+      }
+    };
+  }
+
+  private createForwardPassTool(): Tool {
+    return {
+      name: 'forward_pass',
+      description: 'Predict the next likely code pattern based on current input',
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'array', items: { type: 'number' }, description: 'Current code state vector' }
+        },
+        required: ['x']
+      }
+    };
+  }
+
+  private createGetMemoryStateTool(): Tool {
+    return {
+      name: 'get_memory_state',
+      description: 'Get insights about what patterns the model has learned',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    };
+  }
+
+  private async handleToolCall(request: ToolCallRequest): Promise<unknown> {
+    if (!this.model || !this.memoryState) {
+      await this.autoInitialize();
     }
 
-    this.wsServer = new WebSocket.Server({ port: this.DEFAULT_WS_PORT });
+    return tf.tidy(() => {
+      const args = request.params as Record<string, unknown>;
 
-    this.wsServer.on('connection', (ws: WebSocket) => {
-      console.log('New WebSocket connection established');
+      switch (request.name) {
+        case 'init_model': {
+          const inputDim = (args.inputDim as number) || 768;
+          const outputDim = (args.outputDim as number) || 768;
 
-      ws.on('message', async (message: WebSocket.Data) => {
-        try {
-          // Handle WebSocket messages
-          const data = JSON.parse(message.toString());
-          // Process data...
-        } catch (error) {
-          console.error('Error processing WebSocket message:', error);
-          ws.send(JSON.stringify({ error: 'Failed to process message' }));
+          this.model = new TitanMemoryModel({ inputDim, outputDim });
+          const zeros = tf.zeros([outputDim]);
+          this.memoryState = {
+            shortTerm: wrapTensor(zeros),
+            longTerm: wrapTensor(zeros.clone()),
+            meta: wrapTensor(zeros.clone())
+          };
+          zeros.dispose();
+          return { config: { inputDim, outputDim } };
         }
-      });
-    });
 
-    this.wsServer.on('error', (error: Error) => {
-      console.error('WebSocket server error:', error);
-      if (this.isAutoReconnectEnabled) {
-        setTimeout(() => this.setupWebSocket(), this.AUTO_RECONNECT_INTERVAL);
+        case 'train_step': {
+          const x_t = args.x_t as number[];
+          const x_next = args.x_next as number[];
+
+          if (!x_t || !x_next) {
+            throw new Error('Missing required parameters x_t or x_next');
+          }
+
+          const x_tT = wrapTensor(tf.tensor1d(x_t));
+          const x_nextT = wrapTensor(tf.tensor1d(x_next));
+          const cost = this.model.trainStep(x_tT, x_nextT, this.memoryState);
+          const { predicted, memoryUpdate } = this.model.forward(x_tT, this.memoryState);
+
+          this.memoryState = memoryUpdate.newState;
+
+          const result = {
+            cost: unwrapTensor(cost.loss).dataSync()[0],
+            predicted: Array.from(unwrapTensor(predicted).dataSync()),
+            surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
+          };
+
+          [x_tT, x_nextT, predicted].forEach(t => t.dispose());
+          return result;
+        }
+
+        case 'forward_pass': {
+          const x = args.x as number[];
+
+          if (!x) {
+            throw new Error('Missing required parameter x');
+          }
+
+          const xT = wrapTensor(tf.tensor1d(x));
+          const { predicted, memoryUpdate } = this.model.forward(xT, this.memoryState);
+
+          this.memoryState = memoryUpdate.newState;
+
+          const result = {
+            predicted: Array.from(unwrapTensor(predicted).dataSync()),
+            memory: Array.from(unwrapTensor(memoryUpdate.newState.shortTerm).dataSync()),
+            surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
+          };
+
+          [xT, predicted].forEach(t => t.dispose());
+          return result;
+        }
+
+        case 'get_memory_state': {
+          const stats = {
+            mean: tf.mean(unwrapTensor(this.memoryState.shortTerm)).dataSync()[0],
+            std: tf.moments(unwrapTensor(this.memoryState.shortTerm)).variance.sqrt().dataSync()[0]
+          };
+
+          return {
+            memoryStats: stats,
+            memorySize: this.memoryState.shortTerm.shape[0],
+            status: 'active'
+          };
+        }
+
+        default:
+          throw new Error(`Unknown tool: ${request.name}`);
       }
     });
   }
 
-  private async autoInitialize() {
+  private async autoInitialize(): Promise<void> {
     try {
-      // Ensure memory directory exists
+      // Create memory directory if it doesn't exist
       await fs.mkdir(this.memoryPath, { recursive: true });
 
-      // Ensure weights directory exists
-      await fs.mkdir(this.weightsPath, { recursive: true });
+      // Check if we have saved state
+      const hasSavedState = await this.loadSavedState();
 
-      // Initialize model if needed
-      if (!this.model) {
-        const modelConfig = {
+      if (!hasSavedState) {
+        // Initialize new model with default settings
+        this.model = new TitanMemoryModel({
           inputDim: 768,
-          outputDim: 768,
-          modelPath: this.modelPath,
-          weightsPath: this.weightsPath
-        };
-        this.model = new TitanMemoryModel(modelConfig);
+          outputDim: 768
+        });
 
-        // Initialize memory state
-        const zeros = tf.zeros([modelConfig.outputDim]);
+        // Initialize memory state with zeros
+        const zeros = tf.zeros([768]);
         this.memoryState = {
           shortTerm: wrapTensor(zeros),
           longTerm: wrapTensor(zeros.clone()),
@@ -236,79 +376,84 @@ export class TitanMemoryServer {
         };
         zeros.dispose();
 
-        // Try to load saved state
-        await this.loadSavedState();
+        // Save initial state
+        await this.saveMemoryState();
       }
 
-      // Setup automatic memory saving
-      if (!this.autoSaveInterval) {
-        this.autoSaveInterval = setInterval(async () => {
-          await this.saveMemoryState();
-        }, 5 * 60 * 1000); // Every 5 minutes
-        this.autoSaveInterval.unref();
+      // Set up auto-save interval
+      if (this.autoSaveInterval === null) {
+        this.autoSaveInterval = setInterval(() => {
+          this.saveMemoryState().catch(console.error);
+        }, 5 * 60 * 1000); // Auto-save every 5 minutes
       }
-
-      // Setup WebSocket server
-      await this.setupWebSocket();
     } catch (error) {
-      console.error('Error in autoInitialize:', error);
-      throw new Error(`Failed to initialize memory system: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('Failed to initialize model:', error);
+      throw error;
     }
   }
 
-  private async loadSavedState() {
+  private async loadSavedState(): Promise<boolean> {
     try {
-      const statePath = path.join(this.memoryPath, 'memory.json');
-      const exists = await fs.access(statePath)
+      // Check if model and weights files exist
+      const modelExists = await fs.access(this.modelPath)
+        .then(() => true)
+        .catch(() => false);
+      const weightsExist = await fs.access(this.weightsPath)
         .then(() => true)
         .catch(() => false);
 
-      if (exists) {
-        const savedState = JSON.parse(await fs.readFile(statePath, 'utf-8'));
-        if (savedState && savedState.shortTerm) {
-          this.memoryState = {
-            shortTerm: wrapTensor(tf.tensor1d(savedState.shortTerm)),
-            longTerm: wrapTensor(tf.tensor1d(savedState.longTerm)),
-            meta: wrapTensor(tf.tensor1d(savedState.meta))
-          };
-        }
+      if (!modelExists || !weightsExist) {
+        return false;
       }
+
+      // Load model and weights
+      this.model = new TitanMemoryModel();
+      await this.model.save(this.modelPath, this.weightsPath);
+
+      // Load memory state
+      const memoryStateJson = await fs.readFile(
+        path.join(this.memoryPath, 'memory_state.json'),
+        'utf8'
+      );
+      const memoryState = JSON.parse(memoryStateJson);
+      this.memoryState = {
+        shortTerm: wrapTensor(tf.tensor(memoryState.shortTerm)),
+        longTerm: wrapTensor(tf.tensor(memoryState.longTerm)),
+        meta: wrapTensor(tf.tensor(memoryState.meta))
+      };
+
+      return true;
     } catch (error) {
-      console.error('Error loading saved state:', error);
-      // Don't throw - continue with fresh state
+      console.error('Failed to load saved state:', error);
+      return false;
     }
   }
 
-  private async saveMemoryState() {
-    if (this.memoryState) {
-      try {
-        const memoryState = {
-          shortTerm: Array.from(this.memoryState.shortTerm.dataSync()),
-          longTerm: Array.from(this.memoryState.longTerm.dataSync()),
-          meta: Array.from(this.memoryState.meta.dataSync()),
-          timestamp: Date.now()
-        };
+  private async saveMemoryState(): Promise<void> {
+    try {
+      // Save model and weights
+      await this.model.save(this.modelPath, this.weightsPath);
 
-        // Save memory state
-        await fs.writeFile(
-          path.join(this.memoryPath, 'memory.json'),
-          JSON.stringify(memoryState),
-          'utf-8'
-        );
+      // Save memory state
+      const memoryState = {
+        shortTerm: await unwrapTensor(this.memoryState.shortTerm).array(),
+        longTerm: await unwrapTensor(this.memoryState.longTerm).array(),
+        meta: await unwrapTensor(this.memoryState.meta).array()
+      };
 
-        // Save model state if available
-        if (this.model) {
-          await this.model.save(this.modelPath, this.weightsPath);
-        }
-      } catch (error) {
-        console.error('Error saving memory state:', error);
-      }
+      await fs.writeFile(
+        path.join(this.memoryPath, 'memory_state.json'),
+        JSON.stringify(memoryState, null, 2)
+      );
+    } catch (error) {
+      console.error('Failed to save memory state:', error);
+      throw error;
     }
   }
 
   private async reconnect() {
     try {
-      const transport = new StdioServerTransport();
+      const transport = new StdioServerTransportImpl();
       await this.server.connect(transport);
       this.reconnectAttempts = 0;
       console.error('Successfully reconnected to MCP');
@@ -339,110 +484,9 @@ export class TitanMemoryServer {
     await this.saveMemoryState();
   }
 
-  private async handleToolCall(request: any) {
-    try {
-      // Ensure model is initialized
-      if (!this.model || !this.memoryState) {
-        await this.autoInitialize();
-      }
-
-      this.assertModelInitialized();
-
-      // Wrap all tensor operations in tidy
-      return tf.tidy(() => {
-        switch (request.params.name) {
-          case 'init_model': {
-            const { inputDim = 768, outputDim = 768 } = request.params.arguments as TitanMemoryTools['init_model'];
-            this.model = new TitanMemoryModel({ inputDim, outputDim });
-
-            const zeros = tf.zeros([outputDim]);
-            this.memoryState = {
-              shortTerm: wrapTensor(zeros),
-              longTerm: wrapTensor(zeros.clone()),
-              meta: wrapTensor(zeros.clone())
-            };
-            zeros.dispose();
-
-            return { config: { inputDim, outputDim } };
-          }
-          case 'train_step': {
-            const { x_t, x_next } = request.params.arguments as TitanMemoryTools['train_step'];
-            const x_tT = wrapTensor(tf.tensor1d(x_t));
-            const x_nextT = wrapTensor(tf.tensor1d(x_next));
-            const cost = this.model.trainStep(x_tT, x_nextT, this.memoryState);
-            const { predicted, memoryUpdate } = this.model.forward(x_tT, this.memoryState);
-
-            // Update memory state
-            this.memoryState = memoryUpdate.newState;
-
-            const result = {
-              cost: unwrapTensor(cost.loss).dataSync()[0],
-              predicted: Array.from(unwrapTensor(predicted).dataSync()),
-              surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
-            };
-            [x_tT, x_nextT, predicted].forEach(t => t.dispose());
-            return result;
-          }
-          case 'forward_pass': {
-            const { x } = request.params.arguments as TitanMemoryTools['forward_pass'];
-            const xT = wrapTensor(tf.tensor1d(x));
-            const { predicted, memoryUpdate } = this.model.forward(xT, this.memoryState);
-
-            // Update memory state
-            this.memoryState = memoryUpdate.newState;
-
-            const result = {
-              predicted: Array.from(unwrapTensor(predicted).dataSync()),
-              memory: Array.from(unwrapTensor(memoryUpdate.newState.shortTerm).dataSync()),
-              surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
-            };
-            [xT, predicted].forEach(t => t.dispose());
-            return result;
-          }
-          case 'get_memory_state': {
-            const stats = {
-              mean: tf.mean(this.memoryState.shortTerm).dataSync()[0],
-              std: tf.moments(this.memoryState.shortTerm).variance.sqrt().dataSync()[0]
-            };
-            return {
-              memoryStats: stats,
-              memorySize: this.memoryState.shortTerm.shape[0],
-              status: 'active'
-            };
-          }
-          default:
-            throw new Error(`Unknown tool: ${request.params.name}`);
-        }
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      console.error('Tool call error:', errorMessage);
-      throw new Error(`Error handling tool call: ${errorMessage}`);
-    }
-  }
-
-  public async run() {
-    try {
-      // Ensure initialization
-      await this.autoInitialize();
-
-      // Set up stdio transport for MCP communication
-      const transport = new StdioServerTransport();
-      await this.server.connect(transport);
-
-      // Start express server if port is specified
-      if (this.port > 0) {
-        await new Promise<void>((resolve) => {
-          this.app.listen(this.port, () => {
-            console.error(`HTTP server listening on port ${this.port}`);
-            resolve();
-          });
-        });
-      }
-    } catch (error) {
-      console.error('Error starting server:', error);
-      throw error;
-    }
+  public async run(): Promise<void> {
+    await this.setupWebSocket();
+    console.log('Titan Memory Server running...');
   }
 }
 
@@ -474,4 +518,21 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error('Failed to start server:', error);
     process.exit(1);
   });
+}
+
+// Example usage
+async function main() {
+  // Create a WebSocket transport
+  const wsTransport = new WebSocketTransport('ws://localhost:8080');
+  const server = new TitanServer(wsTransport);
+  await server.start();
+
+  // Create a stdio transport
+  const stdioTransport = new StdioTransport();
+  const stdioServer = new TitanServer(stdioTransport);
+  await stdioServer.start();
+}
+
+if (require.main === module) {
+  main().catch(console.error);
 }

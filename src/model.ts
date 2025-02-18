@@ -27,7 +27,7 @@
  */
 
 import * as tf from '@tensorflow/tfjs';
-import { ITensor, IMemoryModel, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, TensorWrapper, wrapTensor, unwrapTensor } from './types.js';
+import { ITensor, IMemoryModel, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, TensorContainer, unwrapTensor } from './types.js';
 import * as fs from 'fs/promises';
 
 /**
@@ -155,27 +155,21 @@ export class TitanMemoryModel implements IMemoryModel {
    * @returns Attention block containing keys, values, and computed scores
    */
   private computeAttention(query: tf.Tensor, keys: tf.Tensor, values: tf.Tensor): IAttentionBlock {
-    return tf.tidy(() => {
-      // Multi-head attention
+    const result = tf.tidy(() => {
       const scores = tf.matMul(
         tf.matMul(query, this.queryProjection),
         tf.matMul(keys, this.keyProjection).transpose()
       ).div(tf.sqrt(tf.scalar(this.keyDim)));
 
       const attentionWeights = tf.softmax(scores);
-      const weightedValues = tf.matMul(attentionWeights, tf.matMul(values, this.valueProjection));
-
-      const output = tf.matMul(
-        weightedValues.reshape([-1, this.attentionHeads * this.valueDim]),
-        this.outputProjection
-      );
 
       return {
-        keys: wrapTensor(keys),
-        values: wrapTensor(values),
-        scores: wrapTensor(attentionWeights)
+        keys,
+        values,
+        scores: attentionWeights
       };
     });
+    return result;
   }
 
   /**
@@ -188,19 +182,17 @@ export class TitanMemoryModel implements IMemoryModel {
    * @returns Immediate and accumulated surprise metrics
    */
   private computeSurprise(predicted: tf.Tensor, actual: tf.Tensor, history: tf.Tensor): ISurpriseMetrics {
-    return tf.tidy(() => {
+    const result = tf.tidy(() => {
       const diff = tf.sub(predicted, actual);
-      const immediate = tf.mean(tf.square(diff));
-
       const historicalContext = tf.concat([diff, history], 1);
       const surpriseFeatures = tf.matMul(historicalContext, this.surpriseNetwork);
       const [immediateScore, accumulatedScore] = tf.split(surpriseFeatures, 2, 1);
-
       return {
-        immediate: wrapTensor(immediateScore),
-        accumulated: wrapTensor(accumulatedScore)
+        immediate: immediateScore,
+        accumulated: accumulatedScore
       };
     });
+    return result;
   }
 
   /**
@@ -217,30 +209,24 @@ export class TitanMemoryModel implements IMemoryModel {
    * @param memoryState Current memory state
    * @returns Predicted output and memory updates
    */
-  public forward(x: ITensor, memoryState: IMemoryState): {
-    predicted: ITensor;
-    memoryUpdate: IMemoryUpdateResult;
-  } {
-    const input = unwrapTensor(x);
-    const shortTerm = unwrapTensor(memoryState.shortTerm);
-    const longTerm = unwrapTensor(memoryState.longTerm);
-    const meta = unwrapTensor(memoryState.meta);
+  public forward(x: ITensor, memoryState: IMemoryState): { predicted: ITensor; memoryUpdate: IMemoryUpdateResult } {
+    const input = x;
+    const shortTerm = memoryState.shortTerm;
+    const longTerm = memoryState.longTerm;
+    const meta = memoryState.meta;
 
-    return tf.tidy(() => {
-      // Encode input and memories
+    const result = tf.tidy(() => {
       const encodedInput = tf.matMul(input, this.shortTermEncoder);
       const encodedShortTerm = tf.matMul(shortTerm, this.shortTermEncoder);
       const encodedLongTerm = tf.matMul(longTerm, this.longTermEncoder);
       const encodedMeta = tf.matMul(meta, this.metaEncoder);
 
-      // Compute attention over memories
       const attention = this.computeAttention(
         encodedInput,
         tf.concat([encodedShortTerm, encodedLongTerm], 0),
         tf.concat([shortTerm, longTerm], 0)
       );
 
-      // Generate prediction
       const combinedContext = tf.concat([
         encodedInput,
         tf.matMul(attention.scores, tf.concat([shortTerm, longTerm], 0)),
@@ -248,28 +234,26 @@ export class TitanMemoryModel implements IMemoryModel {
       ], 1);
 
       const predicted = tf.matMul(combinedContext, this.shortTermDecoder);
-
-      // Compute surprise metrics
       const surprise = this.computeSurprise(predicted, input, encodedMeta);
 
-      // Update memory states
       const newShortTerm = tf.matMul(combinedContext, this.shortTermDecoder);
       const newLongTerm = tf.matMul(combinedContext, this.longTermDecoder);
       const newMeta = tf.matMul(combinedContext, this.metaDecoder);
 
       return {
-        predicted: wrapTensor(predicted),
+        predicted,
         memoryUpdate: {
           newState: {
-            shortTerm: wrapTensor(newShortTerm),
-            longTerm: wrapTensor(newLongTerm),
-            meta: wrapTensor(newMeta)
+            shortTerm: newShortTerm,
+            longTerm: newLongTerm,
+            meta: newMeta
           },
           attention,
           surprise
         }
       };
     });
+    return result;
   }
 
   /**
@@ -285,42 +269,42 @@ export class TitanMemoryModel implements IMemoryModel {
    * @param memoryState Current memory state
    * @returns Loss and computed gradients
    */
-  public trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): {
-    loss: ITensor;
-    gradients: IModelGradients;
-  } {
+  public trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): { loss: ITensor; gradients: IModelGradients } {
     const xt = unwrapTensor(x_t);
     const xn = unwrapTensor(x_next);
 
-    return tf.tidy(() => {
+    const result = tf.tidy(() => {
       const { predicted, memoryUpdate } = this.forward(x_t, memoryState);
 
-      // Compute prediction loss
-      const predLoss = tf.mean(tf.square(tf.sub(unwrapTensor(predicted), xn)));
+      // Compute prediction loss and ensure it's a scalar
+      const predLoss = tf.mean(tf.square(tf.sub(predicted, xn))).asScalar();
 
-      // Add surprise regularization
+      // Compute surprise loss components and ensure they're scalars
+      const immediateLoss = tf.mean(tf.square(tf.sub(unwrapTensor(memoryUpdate.surprise.immediate), tf.scalar(0)))).asScalar();
+      const accumulatedLoss = tf.mean(tf.square(tf.sub(unwrapTensor(memoryUpdate.surprise.accumulated), tf.scalar(0)))).asScalar();
+
+      // Combine losses with weights
       const surpriseLoss = tf.add(
-        tf.mul(tf.scalar(0.1), unwrapTensor(memoryUpdate.surprise.immediate)),
-        tf.mul(tf.scalar(0.05), unwrapTensor(memoryUpdate.surprise.accumulated))
-      );
+        tf.mul(tf.scalar(0.1), immediateLoss),
+        tf.mul(tf.scalar(0.05), accumulatedLoss)
+      ).asScalar();
 
-      // Total loss
-      const totalLoss = tf.add(predLoss, surpriseLoss);
+      // Compute total loss as scalar
+      const totalLoss = tf.add(predLoss, surpriseLoss).asScalar();
 
-      // Compute gradients for each memory component
-      const { value: shortTermGrad } = tf.variableGrads(() => totalLoss.asScalar(), [this.shortTermEncoder]);
-      const { value: longTermGrad } = tf.variableGrads(() => totalLoss.asScalar(), [this.longTermEncoder]);
-      const { value: metaGrad } = tf.variableGrads(() => totalLoss.asScalar(), [this.metaEncoder]);
+      // Compute gradients with respect to the scalar loss
+      const { grads } = tf.variableGrads(() => totalLoss);
 
       return {
-        loss: wrapTensor(totalLoss),
+        loss: totalLoss,
         gradients: {
-          shortTerm: wrapTensor(shortTermGrad),
-          longTerm: wrapTensor(longTermGrad),
-          meta: wrapTensor(metaGrad)
+          shortTerm: grads[this.shortTermEncoder.name] || tf.zeros(this.shortTermEncoder.shape),
+          longTerm: grads[this.longTermEncoder.name] || tf.zeros(this.longTermEncoder.shape),
+          meta: grads[this.metaEncoder.name] || tf.zeros(this.metaEncoder.shape)
         }
       };
     });
+    return result;
   }
 
   /**
@@ -334,7 +318,7 @@ export class TitanMemoryModel implements IMemoryModel {
    * @returns Updated meta-memory
    */
   public updateMetaMemory(surprise: ISurpriseMetrics, context: ITensor): ITensor {
-    return tf.tidy(() => {
+    const result = tf.tidy(() => {
       const surpriseInput = tf.concat([
         unwrapTensor(surprise.immediate),
         unwrapTensor(surprise.accumulated)
@@ -342,10 +326,9 @@ export class TitanMemoryModel implements IMemoryModel {
 
       const contextFeatures = unwrapTensor(context);
       const combined = tf.concat([surpriseInput, contextFeatures], 0);
-
-      const metaUpdate = tf.matMul(combined, this.metaEncoder);
-      return wrapTensor(metaUpdate);
+      return tf.matMul(combined, this.metaEncoder);
     });
+    return result;
   }
 
   /**
@@ -359,26 +342,22 @@ export class TitanMemoryModel implements IMemoryModel {
    * @returns Pruned memory state
    */
   public pruneMemory(memoryState: IMemoryState, threshold: number): IMemoryState {
-    return tf.tidy(() => {
+    const result = tf.tidy(() => {
       const shortTerm = unwrapTensor(memoryState.shortTerm);
       const longTerm = unwrapTensor(memoryState.longTerm);
       const meta = unwrapTensor(memoryState.meta);
-
-      // Compute importance scores
       const scores = tf.sigmoid(tf.matMul(
         tf.concat([shortTerm, longTerm, meta], 1),
         this.pruningNetwork
       ));
-
-      // Mask out low-importance memories
       const mask = scores.greater(tf.scalar(threshold));
-
       return {
-        shortTerm: wrapTensor(tf.mul(shortTerm, mask)),
-        longTerm: wrapTensor(tf.mul(longTerm, mask)),
-        meta: wrapTensor(tf.mul(meta, mask))
+        shortTerm: tf.mul(shortTerm, mask),
+        longTerm: tf.mul(longTerm, mask),
+        meta: tf.mul(meta, mask)
       };
     });
+    return result;
   }
 
   /**
@@ -392,40 +371,35 @@ export class TitanMemoryModel implements IMemoryModel {
    * @returns Updated point on manifold
    */
   public manifoldStep(base: ITensor, velocity: ITensor): ITensor {
-    // Riemannian "update" if useManifold is true
     if (!this.useManifold) {
-      // Standard Euclidean update
-      return wrapTensor(tf.add(unwrapTensor(base), unwrapTensor(velocity)));
+      return tf.add(unwrapTensor(base), unwrapTensor(velocity));
     }
-
     const result = tf.tidy(() => {
       const baseTensor = unwrapTensor(base);
       const velocityTensor = unwrapTensor(velocity);
       const epsilon = 1e-8;
       const maxStep = 0.1;
 
-      const dot = baseTensor.mul(velocityTensor).sum();
+      const dot = baseTensor.mul(velocityTensor).sum().asScalar();
       const radial = baseTensor.mul(dot);
       const tangent = velocityTensor.sub(radial);
-      const tnorm = tangent.norm();
+      const tNormVal = tangent.norm().asScalar();
+      const tNormValNum = tNormVal.dataSync()[0];
 
-      const tNormVal = tnorm.dataSync()[0];
-      if (tNormVal < epsilon) {
-        return wrapTensor(baseTensor);
+      if (tNormValNum < epsilon) {
+        return baseTensor;
       }
 
-      const stepSize = Math.min(tNormVal, maxStep);
-      const direction = tangent.div(tf.scalar(tNormVal));
+      const stepSize = Math.min(tNormValNum, maxStep);
+      const direction = tangent.div(tNormVal);
       const cosV = tf.cos(tf.scalar(stepSize));
       const sinV = tf.sin(tf.scalar(stepSize));
       const part1 = baseTensor.mul(cosV);
       const part2 = direction.mul(sinV);
       const newParam = part1.add(part2);
-      const newParamNorm = newParam.norm();
-
-      return wrapTensor(newParam.div(newParamNorm.add(tf.scalar(1e-12))));
+      const newParamNorm = newParam.norm().asScalar();
+      return newParam.div(newParamNorm.add(tf.scalar(1e-12)));
     });
-
     return result;
   }
 
@@ -503,5 +477,25 @@ export class TitanMemoryModel implements IMemoryModel {
       metaLearningRate: this.metaLearningRate,
       maxMemorySize: this.maxMemorySize
     };
+  }
+
+  /**
+   * Saves the entire model to disk.
+   * This method saves both the model architecture and weights.
+   * 
+   * @param modelPath Path to save the model architecture
+   * @param weightsPath Path to save the model weights
+   */
+  public async save(modelPath: string, weightsPath: string): Promise<void> {
+    // Save model architecture/configuration
+    const modelConfig = {
+      ...this.getConfig(),
+      version: '1.0.0',
+      architecture: 'titan-memory'
+    };
+    await fs.writeFile(modelPath.replace('file://', ''), JSON.stringify(modelConfig, null, 2));
+
+    // Save weights using existing saveModel method
+    await this.saveModel(weightsPath);
   }
 }

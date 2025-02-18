@@ -5,24 +5,14 @@
  * model interactions.
  */
 
-import * as tf from '@tensorflow/tfjs-node';
+import * as tf from '@tensorflow/tfjs';
 import { z } from "zod";
 
 /**
  * Basic interface for an in-house tensor object that wraps TensorFlow.js tensors.
  * Provides essential operations while maintaining compatibility with tf.TensorContainerObject.
  */
-export interface ITensor {
-  /** Returns the raw data */
-  dataSync(): Float32Array | Int32Array | Uint8Array;
-  /** Releases the memory associated with this tensor */
-  dispose(): void;
-  /** The shape of the tensor as an array of dimensions */
-  shape: number[];
-  /** Additional properties required for TensorContainerObject compatibility */
-  [key: string]: any;
-  data: tf.Tensor;
-}
+export type ITensor = tf.Tensor;
 
 /**
  * Interface defining the core tensor operations available in the system.
@@ -87,68 +77,63 @@ export interface ITensorOps {
  * Represents an attention block in the Titans architecture.
  * Contains the key-value pairs and attention scores used in the memory mechanism.
  */
-export interface IAttentionBlock extends tf.TensorContainerObject {
+export interface IAttentionBlock extends TensorContainer {
   /** Keys used for attention computation */
   keys: ITensor;
   /** Values to be attended over */
   values: ITensor;
   /** Computed attention scores */
   scores: ITensor;
-  [key: string]: any;
 }
 
 /**
  * Tracks both immediate and accumulated surprise metrics.
  * Used to guide memory updates and test-time learning.
  */
-export interface ISurpriseMetrics extends tf.TensorContainerObject {
+export interface ISurpriseMetrics extends TensorContainer {
   /** Immediate surprise from current prediction */
   immediate: ITensor;
   /** Accumulated surprise over time */
   accumulated: ITensor;
-  [key: string]: any;
 }
 
 /**
  * Represents the three-tier memory state in the Titans architecture.
  * Combines short-term, long-term, and meta-memory components.
  */
-export interface IMemoryState extends tf.TensorContainerObject {
+export interface IMemoryState extends TensorContainer {
   /** Short-term memory for immediate context */
   shortTerm: ITensor;
   /** Long-term memory for persistent information */
   longTerm: ITensor;
   /** Meta-memory for learning to memorize */
   meta: ITensor;
-  [key: string]: any;
 }
 
 /**
  * Result of a memory update operation, containing the new memory state
  * and associated attention and surprise metrics.
  */
-export interface IMemoryUpdateResult extends tf.TensorContainerObject {
+export interface IMemoryUpdateResult extends TensorContainer {
   /** Updated memory state after forward pass */
   newState: IMemoryState;
   /** Attention computations used in the update */
   attention: IAttentionBlock;
   /** Computed surprise metrics */
   surprise: ISurpriseMetrics;
-  [key: string]: any;
 }
 
 /**
  * Gradients computed for each memory component during training.
  * Used to update the model's parameters.
  */
-export interface IModelGradients extends tf.TensorContainerObject {
+export interface IModelGradients extends TensorContainer {
   /** Gradients for short-term memory */
   shortTerm: ITensor;
   /** Gradients for long-term memory */
   longTerm: ITensor;
   /** Gradients for meta-memory */
   meta: ITensor;
-  [key: string]: any;
 }
 
 /**
@@ -176,11 +161,7 @@ export interface IMemoryModel {
    */
   trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): {
     loss: ITensor;
-    gradients: {
-      shortTerm: ITensor;
-      longTerm: ITensor;
-      meta: ITensor;
-    };
+    gradients: IModelGradients;
   };
 
   /**
@@ -236,35 +217,8 @@ export interface IMemoryModel {
  * Wrapper class for TensorFlow.js tensors.
  * Provides a consistent interface for tensor operations while managing underlying TF.js tensors.
  */
-export class TensorWrapper implements ITensor {
-  constructor(private tensor: tf.Tensor) { }
-
-  [key: string]: any;
-
-  static fromTensor(tensor: tf.Tensor): TensorWrapper {
-    return new TensorWrapper(tensor);
-  }
-
-  get shape(): number[] {
-    return this.tensor.shape;
-  }
-
-  dataSync(): Float32Array | Int32Array | Uint8Array {
-    return this.tensor.dataSync();
-  }
-
-  dispose(): void {
-    this.tensor.dispose();
-  }
-
-  toJSON(): any {
-    return {
-      dataSync: Array.from(this.dataSync()),
-      shape: this.shape
-    };
-  }
-
-  data: tf.Tensor;
+export interface TensorWrapper extends tf.Tensor {
+  __brand: 'TensorWrapper';
 }
 
 /**
@@ -272,23 +226,17 @@ export class TensorWrapper implements ITensor {
  * @param tensor TensorFlow.js tensor to wrap
  * @returns Wrapped tensor
  */
-export function wrapTensor(tensor: tf.Tensor): ITensor {
-  return {
-    data: tensor,
-    dispose: () => tensor.dispose(),
-    dataSync: () => tensor.dataSync(),
-    shape: tensor.shape
-  };
+export function wrapTensor(tensor: tf.Tensor): TensorWrapper {
+  return tensor as TensorWrapper;
 }
 
 /**
  * Unwraps a tensor to get the underlying TensorFlow.js tensor.
- * @param tensor Wrapped tensor
+ * @param tensor Tensor to unwrap
  * @returns Underlying TensorFlow.js tensor
- * @throws Error if tensor is not a TensorWrapper
  */
-export function unwrapTensor(tensor: ITensor): tf.Tensor {
-  return tensor.data;
+export function unwrapTensor(tensor: ITensor | TensorWrapper): tf.Tensor {
+  return tensor;
 }
 
 /**
@@ -306,3 +254,43 @@ export const StoreMemoryInput = z.object({
 export const RecallMemoryInput = z.object({
   query: z.string()
 });
+
+export interface ServerCapabilities {
+  tools: boolean;
+  memory: boolean;
+}
+
+export interface CallToolRequest {
+  name: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface CallToolResult {
+  success: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+export interface Server {
+  capabilities: ServerCapabilities;
+  handleRequest(request: CallToolRequest): Promise<CallToolResult>;
+  connect(transport: Transport): Promise<void>;
+}
+
+export interface Transport {
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  onRequest(handler: (request: CallToolRequest) => Promise<CallToolResult>): void;
+}
+
+export interface WebSocketTransport extends Transport {
+  // Additional WebSocket-specific methods if needed
+}
+
+export interface StdioServerTransport extends Transport {
+  // Additional stdio-specific methods if needed
+}
+
+export interface TensorContainer {
+  [key: string]: tf.Tensor | TensorContainer;
+}
