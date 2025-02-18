@@ -1,6 +1,6 @@
 {
   "name": "@henryhawke/mcp-titan",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "A Model Context Protocol server with enhanced Titan Memory implementation",
   "type": "module",
   "main": "build/index.js",
@@ -30,7 +30,8 @@
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-node": "^4.22.0",
     "express": "^4.21.2",
-    "body-parser": "^1.20.3"
+    "body-parser": "^1.20.3",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
@@ -42,7 +43,8 @@
     "ts-jest": "^29.2.5",
     "typescript": "^5.7.3",
     "eslint": "^9.19.0",
-    "prettier": "^3.4.2"
+    "prettier": "^3.4.2",
+    "@types/ws": "^8.5.10"
   },
   "publishConfig": {
     "access": "public"
