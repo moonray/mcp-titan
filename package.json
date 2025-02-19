@@ -1,6 +1,6 @@
 {
   "name": "@henryhawke/mcp-titan",
-  "version": "0.1.9",
+  "version": "1.0.0",
   "description": "MCP server for Titan memory model",
   "main": "build/index.js",
   "type": "module",

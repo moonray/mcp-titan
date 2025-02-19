@@ -114,6 +114,70 @@ export class TitanMemoryServer {
         };
       }
     );
+
+    // Register forward_pass tool
+    this.server.tool(
+      'forward_pass',
+      {
+        x: z.array(z.number())
+      },
+      async ({ x }) => {
+        if (!this.model || !this.memoryState) {
+          throw new Error('Model not initialized');
+        }
+
+        const xT = wrapTensor(tf.tensor1d(x));
+        const { predicted, memoryUpdate } = this.model.forward(xT, this.memoryState);
+
+        this.memoryState = memoryUpdate.newState;
+
+        const result = {
+          predicted: Array.from(unwrapTensor(predicted).dataSync()),
+          memory: Array.from(unwrapTensor(memoryUpdate.newState.shortTerm).dataSync()),
+          surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
+        };
+
+        xT.dispose();
+        predicted.dispose();
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result)
+          }]
+        };
+      }
+    );
+
+    // Register get_memory_state tool
+    this.server.tool(
+      'get_memory_state',
+      {},
+      async () => {
+        if (!this.model || !this.memoryState) {
+          throw new Error('Model not initialized');
+        }
+
+        const shortTermTensor = unwrapTensor(this.memoryState.shortTerm);
+        const stats = {
+          mean: tf.mean(shortTermTensor).dataSync()[0],
+          std: tf.sqrt(tf.moments(shortTermTensor).variance).dataSync()[0]
+        };
+
+        const result = {
+          memoryStats: stats,
+          memorySize: this.memoryState.shortTerm.shape[0],
+          status: 'active'
+        };
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(result)
+          }]
+        };
+      }
+    );
   }
 
   public async run(): Promise<void> {
