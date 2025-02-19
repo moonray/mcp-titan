@@ -7,6 +7,7 @@ import { Server, ServerCapabilities, CallToolRequest, CallToolResult, Transport 
 import WebSocket from 'ws';
 import { Request, Response } from 'express';
 import { z } from 'zod';
+import readline from 'readline';
 
 interface ToolHandlers {
   storeMemory: {
@@ -20,7 +21,7 @@ interface ToolHandlers {
 }
 
 // Schema definitions
-const CallToolRequestSchema = z.object({
+export const CallToolRequestSchema = z.object({
   name: z.string(),
   parameters: z.record(z.unknown())
 });
@@ -48,7 +49,7 @@ export class MCPServer implements Server {
     this.errorHandler = handler;
   }
 
-  onToolCall(handler: (request: CallToolRequest) => Promise<CallToolResult>): void {
+  onToolCall(handler: (request: CallToolRequest) => Promise<CallToolResult>, p0: { name: any; description: any; schema: { type: string; properties: any; required: any; }; }, p1: (params: any) => Promise<unknown>): void {
     this.requestHandler = handler;
   }
 
@@ -94,6 +95,9 @@ export class WebSocketTransport implements Transport {
   private requestHandler?: (request: CallToolRequest) => Promise<CallToolResult>;
 
   constructor(url: string) {
+    if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
+      throw new Error('Invalid WebSocket URL: must start with ws:// or wss://');
+    }
     this.ws = new WebSocket(url);
   }
 
@@ -132,24 +136,33 @@ export class WebSocketTransport implements Transport {
 
 export class StdioTransport implements Transport {
   private requestHandler?: (request: CallToolRequest) => Promise<CallToolResult>;
-  private readline = require('readline').createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
+  private readline: readline.Interface;
+
+  constructor() {
+    this.readline = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+  }
 
   public async connect(): Promise<void> {
     this.readline.on('line', async (line: string) => {
-      if (!this.requestHandler) return;
-
+      if (!this.requestHandler) {
+        console.log(JSON.stringify({
+          success: false,
+          error: 'No handler registered'
+        }));
+        return;
+      }
       try {
-        const request = JSON.parse(line);
-        const validatedRequest = CallToolRequestSchema.parse(request);
-        const response = await this.requestHandler(validatedRequest);
+        const rawRequest = JSON.parse(line);
+        const request = CallToolRequestSchema.parse(rawRequest);
+        const response = await this.requestHandler(request);
         console.log(JSON.stringify(response));
       } catch (error) {
         console.log(JSON.stringify({
           success: false,
-          error: error instanceof Error ? error.message : 'Unknown error occurred'
+          error: error instanceof Error ? error.message : 'Invalid request'
         }));
       }
     });
@@ -194,6 +207,8 @@ export class StdioServerTransportImpl implements Transport {
       process.stderr.write(`Error handling input: ${error}\n`);
     }
   }
+
+
 }
 
 export class TitanExpressServer {

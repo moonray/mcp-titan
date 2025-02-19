@@ -1,6 +1,8 @@
 import { Transport, CallToolRequest, CallToolResult } from './types.js';
 import WebSocket from 'ws';
 import * as readline from 'readline';
+import { z } from 'zod';
+import { CallToolRequestSchema } from './server.js';
 
 export class WebSocketTransport implements Transport {
   private ws: WebSocket;
@@ -17,15 +19,16 @@ export class WebSocketTransport implements Transport {
 
       this.ws.onmessage = async (event) => {
         if (!this.requestHandler) return;
-
         try {
-          const request = JSON.parse(event.data.toString()) as CallToolRequest;
+          const rawRequest = JSON.parse(event.data.toString());
+          const request = CallToolRequestSchema.parse(rawRequest); // Validate
           const response = await this.requestHandler(request);
           this.ws.send(JSON.stringify(response));
         } catch (error) {
+          // Send validation errors
           this.ws.send(JSON.stringify({
             success: false,
-            error: error instanceof Error ? error.message : 'Unknown error occurred'
+            error: error instanceof Error ? error.message : 'Invalid request'
           }));
         }
       };
@@ -86,4 +89,5 @@ export class StdioTransport implements Transport {
   onRequest(handler: (request: CallToolRequest) => Promise<CallToolResult>): void {
     this.requestHandler = handler;
   }
+  
 } 
