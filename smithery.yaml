@@ -1,7 +1,7 @@
 # Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
 
 name: mcp-titan
-version: 1.0.0
+version: 1.0.1
 description: Titan Memory MCP Server for maintaining context and learning patterns
 
 transport: stdio
