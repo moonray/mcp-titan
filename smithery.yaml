@@ -1,13 +1,49 @@
 # Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
 
-startCommand:
-  type: stdio
-  configSchema:
-    # JSON Schema defining the configuration options for the MCP.
-    type: object
-    required: []
-    properties: {}
-  commandFunction:
-    # A function that produces the CLI command to start the MCP on stdio.
-    |-
-    (config) => ({ command: 'node', args: ['build/index.js'] })
+name: mcp-titan
+version: 1.0.0
+description: Titan Memory MCP Server for maintaining context and learning patterns
+
+transport: stdio
+
+tools:
+  init_model:
+    description: Initialize the Titan Memory model for learning code patterns
+    parameters:
+      inputDim:
+        type: number
+        description: "Size of input vectors (default: 768)"
+        optional: true
+      outputDim:
+        type: number
+        description: "Size of memory state (default: 768)"
+        optional: true
+
+  train_step:
+    description: Train the model on a sequence of code to improve pattern recognition
+    parameters:
+      x_t:
+        type: array
+        items:
+          type: number
+        description: "Current code state vector"
+      x_next:
+        type: array
+        items:
+          type: number
+        description: "Next code state vector"
+
+  forward_pass:
+    description: Predict the next likely code pattern based on current input
+    parameters:
+      x:
+        type: array
+        items:
+          type: number
+        description: "Current code state vector"
+
+  get_memory_state:
+    description: Get insights about what patterns the model has learned
+    parameters:
+      type: object
+      properties: {}
