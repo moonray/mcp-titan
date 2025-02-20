@@ -54,6 +54,31 @@ The following files will be created in the memory directory:
 - `model.json`: Model architecture
 - `weights/`: Model weights directory
 
+## Example usage
+Usage Example:
+
+
+``` typescript
+const model = new TitanMemoryModel({
+  memorySlots: 10000,
+  transformerLayers: 8
+});
+
+// Store semantic memory
+await model.storeMemory("User prefers dark mode and large text");
+
+// Recall relevant memories
+const results = await model.recallMemory("interface preferences", 3);
+results.forEach(memory => console.log(memory.arraySync()));
+
+// Continuous learning
+model.trainStep(
+  wrapTensor(currentInput), 
+  wrapTensor(targetOutput),
+  model.getMemoryState()
+);
+```
+
 ## 🤖 LLM Integration
 
 To integrate with your LLM:
