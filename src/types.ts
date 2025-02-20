@@ -143,7 +143,7 @@ export interface IMemoryManager {
  * Interface for vector processing operations.
  */
 export interface IVectorProcessor {
-  processInput(input: number[] | string | tf.Tensor): tf.Tensor;
+  processInput(input: number | number[] | string | tf.Tensor): tf.Tensor;
   validateAndNormalize(tensor: tf.Tensor, expectedShape: number[]): tf.Tensor;
   encodeText(text: string, maxLength?: number): Promise<tf.Tensor>;
 }

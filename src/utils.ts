@@ -109,15 +109,27 @@ export class VectorProcessor {
         return VectorProcessor.instance;
     }
 
-    public processInput(input: number[] | string | tf.Tensor): tf.Tensor {
+    public processInput(input: number | number[] | string | tf.Tensor): tf.Tensor {
         return this.memoryManager.wrapWithMemoryManagement(() => {
             if (typeof input === 'string') {
                 // Convert string to vector using simple encoding
                 const encoded = new TextEncoder().encode(input);
                 return tf.tensor1d(Array.from(encoded));
+            } else if (typeof input === 'number') {
+                // Handle single number input
+                return tf.tensor1d([input]);
             } else if (Array.isArray(input)) {
-                return tf.tensor(input);
+                if (input.length === 0) {
+                    throw new Error('Input array cannot be empty');
+                }
+                if (input.some(val => typeof val !== 'number')) {
+                    throw new Error('All array elements must be numbers');
+                }
+                return tf.tensor1d(input);
             } else if (input instanceof tf.Tensor) {
+                if (!input.shape || input.shape.length === 0) {
+                    throw new Error('Invalid tensor shape');
+                }
                 return input.clone();
             }
             throw new Error('Invalid input type');
@@ -133,12 +145,15 @@ export class VectorProcessor {
             return tf.div(tensor, tf.norm(tensor));
         });
     }
-
-    public async encodeText(text: string, maxLength: number = 512): Promise<tf.Tensor> {
+    public async encodeText(text: string, maxLength: number = 768): Promise<tf.Tensor> {
         return this.memoryManager.wrapWithMemoryManagement(() => {
-            const encoded = new TextEncoder().encode(text.slice(0, maxLength));
+            const encoded = new TextEncoder().encode(text);
             const padded = new Uint8Array(maxLength);
-            padded.set(encoded);
+            padded.set(encoded.slice(0, maxLength));
+            // Ensure we fill remaining space with zeros
+            for (let i = encoded.length; i < maxLength; i++) {
+                padded[i] = 0;
+            }
             return tf.tensor1d(Array.from(padded));
         });
     }

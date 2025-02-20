@@ -1,6 +1,6 @@
 {
   "name": "@henryhawke/mcp-titan",
-  "version": "1.2.0",
+  "version": "1.3.1",
   "description": "Titan Memory MCP Server for maintaining context and learning patterns",
   "type": "module",
   "main": "build/index.js",
