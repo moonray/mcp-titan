@@ -1,12 +1,6 @@
 #!/usr/bin/env node
-import '@tensorflow/tfjs-node';  // Import and register the Node.js backend
+import '@tensorflow/tfjs-node';
 import * as tf from '@tensorflow/tfjs-node';
-import express from 'express';
-import bodyParser from 'body-parser';
-import * as path from 'path';
-import * as os from 'os';
-import * as fs from 'fs/promises';
-import WebSocket from 'ws';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -19,30 +13,27 @@ import {
   CallToolRequest,
   CallToolResult
 } from './types.js';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs/promises';
 
 export class TitanMemoryServer {
   private model!: TitanMemoryModel;
   private server: McpServer;
   private memoryState!: IMemoryState;
-  private app: express.Application;
-  private port: number;
   private memoryPath: string;
   private modelPath: string;
   private weightsPath: string;
   private autoSaveInterval: NodeJS.Timeout | null = null;
   private isInitialized: boolean = false;
 
-  constructor(config: { port?: number; memoryPath?: string; modelPath?: string; weightsPath?: string } = {}) {
-    this.port = config.port || 0;
+  constructor(config: { memoryPath?: string; modelPath?: string; weightsPath?: string } = {}) {
     this.memoryPath = config.memoryPath || path.join(
       os.platform() === 'win32' ? process.env.APPDATA || os.homedir() : os.homedir(),
       '.mcp-titan'
     );
     this.modelPath = config.modelPath || path.join(this.memoryPath, 'model.json');
     this.weightsPath = config.weightsPath || path.join(this.memoryPath, 'weights');
-
-    this.app = express();
-    this.app.use(bodyParser.json());
 
     // Initialize MCP server with proper name and version
     this.server = new McpServer({
@@ -66,15 +57,30 @@ export class TitanMemoryServer {
       'init_model',
       {
         inputDim: z.number().optional(),
-        outputDim: z.number().optional()
+        hiddenDim: z.number().optional(),
+        memoryDim: z.number().optional(),
+        transformerLayers: z.number().optional(),
+        numHeads: z.number().optional(),
+        ffDimension: z.number().optional(),
+        dropoutRate: z.number().optional(),
+        maxSequenceLength: z.number().optional(),
+        memorySlots: z.number().optional(),
+        similarityThreshold: z.number().optional(),
+        surpriseDecay: z.number().optional(),
+        pruningInterval: z.number().optional(),
+        gradientClip: z.number().optional()
       },
-      async ({ inputDim = 768, outputDim = 768 }) => {
-        this.model = new TitanMemoryModel({ inputDim, outputDim });
-        const zeros = tf.zeros([outputDim]);
+      async (params) => {
+        this.model = new TitanMemoryModel(params);
+        const zeros = tf.zeros([params.inputDim || 768]);
+        const slots = this.model.getConfig().memorySlots;
         this.memoryState = {
           shortTerm: wrapTensor(zeros),
           longTerm: wrapTensor(zeros.clone()),
-          meta: wrapTensor(zeros.clone())
+          meta: wrapTensor(zeros.clone()),
+          timestamps: wrapTensor(tf.zeros([slots])),
+          accessCounts: wrapTensor(tf.zeros([slots])),
+          surpriseHistory: wrapTensor(tf.zeros([slots]))
         };
         zeros.dispose();
         this.isInitialized = true;
@@ -82,7 +88,7 @@ export class TitanMemoryServer {
         return {
           content: [{
             type: "text",
-            text: `Model initialized with inputDim=${inputDim}, outputDim=${outputDim}`
+            text: `Model initialized with params: ${JSON.stringify(params)}`
           }]
         };
       }
@@ -100,13 +106,13 @@ export class TitanMemoryServer {
 
         const x_tT = wrapTensor(tf.tensor1d(x_t));
         const x_nextT = wrapTensor(tf.tensor1d(x_next));
-        const cost = this.model.trainStep(x_tT, x_nextT, this.memoryState);
+        const { loss, gradients } = this.model.trainStep(x_tT, x_nextT, this.memoryState);
         const { predicted, memoryUpdate } = this.model.forward(x_tT, this.memoryState);
 
         this.memoryState = memoryUpdate.newState;
 
         const result = {
-          cost: unwrapTensor(cost.loss).dataSync()[0],
+          loss: unwrapTensor(loss).dataSync()[0],
           predicted: Array.from(unwrapTensor(predicted).dataSync()),
           surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
         };
@@ -158,28 +164,24 @@ export class TitanMemoryServer {
     this.server.tool(
       'get_memory_state',
       {
-        type: z.object({}).optional()
+        type: z.string().optional()
       },
       async (_args, _extra) => {
         await this.ensureInitialized();
 
         return tf.tidy(() => {
-          const shortTermTensor = unwrapTensor(this.memoryState.shortTerm);
+          const snapshot = this.model.getMemorySnapshot();
           const stats = {
-            mean: tf.mean(shortTermTensor).dataSync()[0],
-            std: tf.sqrt(tf.moments(shortTermTensor).variance).dataSync()[0]
-          };
-
-          const result = {
-            memoryStats: stats,
-            memorySize: this.memoryState.shortTerm.shape[0],
-            status: 'active'
+            shortTermMean: tf.mean(unwrapTensor(snapshot.shortTerm)).dataSync()[0],
+            shortTermStd: tf.sqrt(tf.moments(unwrapTensor(snapshot.shortTerm)).variance).dataSync()[0],
+            longTermMean: tf.mean(unwrapTensor(snapshot.longTerm)).dataSync()[0],
+            longTermStd: tf.sqrt(tf.moments(unwrapTensor(snapshot.longTerm)).variance).dataSync()[0]
           };
 
           return {
             content: [{
               type: "text" as const,
-              text: JSON.stringify(result)
+              text: JSON.stringify(stats)
             }]
           };
         });
@@ -187,51 +189,23 @@ export class TitanMemoryServer {
     );
   }
 
-  public async run(): Promise<void> {
-    try {
-      await this.autoInitialize();
-
-      const transport = new StdioServerTransport();
-      await this.server.connect(transport);
-
-      // Use proper MCP message format for logging
-      transport.send({
-        jsonrpc: "2.0",
-        method: "log",
-        params: {
-          message: "Titan Memory Server running on stdio"
-        }
-      });
-    } catch (error) {
-      // Format error as proper MCP message
-      const errorMessage = {
-        jsonrpc: "2.0",
-        method: "error",
-        params: {
-          message: `Fatal error running server: ${error instanceof Error ? error.message : String(error)}`
-        }
-      };
-      console.error(JSON.stringify(errorMessage));
-      process.exit(1);
-    }
-  }
-
   private async autoInitialize(): Promise<void> {
     try {
       await fs.mkdir(this.memoryPath, { recursive: true });
 
-      const initializeState = () => {
-        const shortTerm = tf.zeros([768]);
-        return {
-          shortTerm: wrapTensor(shortTerm),
-          longTerm: wrapTensor(tf.zerosLike(shortTerm)),
-          meta: wrapTensor(tf.zerosLike(shortTerm))
-        };
-      };
-
       if (!(await this.loadSavedState())) {
-        this.model = new TitanMemoryModel({ inputDim: 768, outputDim: 768 });
-        this.memoryState = initializeState();
+        this.model = new TitanMemoryModel();
+        const zeros = tf.zeros([768]);
+        const slots = this.model.getConfig().memorySlots;
+        this.memoryState = {
+          shortTerm: wrapTensor(zeros),
+          longTerm: wrapTensor(zeros.clone()),
+          meta: wrapTensor(zeros.clone()),
+          timestamps: wrapTensor(tf.zeros([slots])),
+          accessCounts: wrapTensor(tf.zeros([slots])),
+          surpriseHistory: wrapTensor(tf.zeros([slots]))
+        };
+        zeros.dispose();
         await this.saveMemoryState();
       }
 
@@ -241,26 +215,13 @@ export class TitanMemoryServer {
         }, 300000); // 5 minutes
       }
     } catch (error) {
-      const initializeState = () => {
-        const shortTerm = tf.zeros([768]);
-        return {
-          shortTerm: wrapTensor(shortTerm),
-          longTerm: wrapTensor(tf.zerosLike(shortTerm)),
-          meta: wrapTensor(tf.zerosLike(shortTerm))
-        };
-      };
-      console.error('Initialization failed, using default model:', error);
-      this.model = new TitanMemoryModel({ inputDim: 768, outputDim: 768 });
-      this.memoryState = initializeState();
-      await this.saveMemoryState();
-      console.error('Failed to initialize model:', error);
+      console.error('Initialization failed:', error);
       throw error;
     }
   }
 
   private async loadSavedState(): Promise<boolean> {
     try {
-      // Check if model and weights files exist
       const modelExists = await fs.access(this.modelPath)
         .then(() => true)
         .catch(() => false);
@@ -272,11 +233,7 @@ export class TitanMemoryServer {
         return false;
       }
 
-      // Load model and weights
-      this.model = new TitanMemoryModel();
-      await this.model.save(this.modelPath, this.weightsPath);
-
-      // Load memory state
+      await this.model.loadModel(this.modelPath);
       const memoryStateJson = await fs.readFile(
         path.join(this.memoryPath, 'memory_state.json'),
         'utf8'
@@ -285,7 +242,10 @@ export class TitanMemoryServer {
       this.memoryState = {
         shortTerm: wrapTensor(tf.tensor(memoryState.shortTerm)),
         longTerm: wrapTensor(tf.tensor(memoryState.longTerm)),
-        meta: wrapTensor(tf.tensor(memoryState.meta))
+        meta: wrapTensor(tf.tensor(memoryState.meta)),
+        timestamps: wrapTensor(tf.tensor(memoryState.timestamps)),
+        accessCounts: wrapTensor(tf.tensor(memoryState.accessCounts)),
+        surpriseHistory: wrapTensor(tf.tensor(memoryState.surpriseHistory))
       };
 
       return true;
@@ -297,29 +257,50 @@ export class TitanMemoryServer {
 
   private async saveMemoryState(): Promise<void> {
     try {
-      // Use tf.keep() to prevent premature disposal
-      const shortTerm = tf.keep(tf.clone(unwrapTensor(this.memoryState.shortTerm)));
-      const longTerm = tf.keep(tf.clone(unwrapTensor(this.memoryState.longTerm)));
-      const meta = tf.keep(tf.clone(unwrapTensor(this.memoryState.meta)));
-
+      await this.model.saveModel(this.modelPath);
       const memoryState = {
-        shortTerm: await shortTerm.array(),
-        longTerm: await longTerm.array(),
-        meta: await meta.array()
+        shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
+        longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).dataSync()),
+        meta: Array.from(unwrapTensor(this.memoryState.meta).dataSync()),
+        timestamps: Array.from(unwrapTensor(this.memoryState.timestamps).dataSync()),
+        accessCounts: Array.from(unwrapTensor(this.memoryState.accessCounts).dataSync()),
+        surpriseHistory: Array.from(unwrapTensor(this.memoryState.surpriseHistory).dataSync())
       };
 
       await fs.writeFile(
         path.join(this.memoryPath, 'memory_state.json'),
         JSON.stringify(memoryState, null, 2)
       );
-
-      // Dispose only after serialization completes
-      tf.tidy(() => {
-        [shortTerm, longTerm, meta].forEach(t => t.dispose());
-      });
     } catch (error) {
       console.error('Failed to save memory state:', error);
       throw error;
+    }
+  }
+
+  public async run(): Promise<void> {
+    try {
+      await this.autoInitialize();
+
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+
+      transport.send({
+        jsonrpc: "2.0",
+        method: "log",
+        params: {
+          message: "Titan Memory Server running on stdio"
+        }
+      });
+    } catch (error) {
+      const errorMessage = {
+        jsonrpc: "2.0",
+        method: "error",
+        params: {
+          message: `Fatal error running server: ${error instanceof Error ? error.message : String(error)}`
+        }
+      };
+      console.error(JSON.stringify(errorMessage));
+      process.exit(1);
     }
   }
 }

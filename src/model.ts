@@ -23,6 +23,7 @@ const ModelConfigSchema = z.object({
   surpriseDecay: z.number().min(0).max(1).default(0.9),
   pruningInterval: z.number().int().positive().default(1000),
   gradientClip: z.number().positive().default(1.0),
+  learningRate: z.number().positive().default(0.001),
 });
 
 type TitanMemoryConfig = z.infer<typeof ModelConfigSchema>;
@@ -30,17 +31,20 @@ type TitanMemoryConfig = z.infer<typeof ModelConfigSchema>;
 export class TitanMemoryModel implements IMemoryModel {
   private config: TitanMemoryConfig;
   private tokenizer!: Tokenizer;
-  private transformerStack: tf.LayersModel[];
-  private memoryProjector: tf.LayersModel;
-  private similarityNetwork: tf.LayersModel;
-  private optimizer: tf.Optimizer;
+  private transformerStack: tf.LayersModel[] = [];
+  private memoryProjector!: tf.LayersModel;
+  private similarityNetwork!: tf.LayersModel;
+  private optimizer!: tf.Optimizer;
   private stepCount = 0;
 
   // Enhanced memory state with temporal dynamics
-  private memoryState: IMemoryState & {
-    timestamps: tf.Tensor1D;
-    accessCounts: tf.Tensor1D;
-    surpriseHistory: tf.Tensor1D;
+  private memoryState: IMemoryState = {
+    shortTerm: tf.zeros([0]),
+    longTerm: tf.zeros([0]),
+    meta: tf.zeros([0]),
+    timestamps: tf.zeros([0]),
+    accessCounts: tf.zeros([0]),
+    surpriseHistory: tf.zeros([0])
   };
 
   constructor(config?: Partial<TitanMemoryConfig>) {
@@ -54,9 +58,10 @@ export class TitanMemoryModel implements IMemoryModel {
     this.transformerStack = Array.from({ length: this.config.transformerLayers }, () =>
       tf.sequential({
         layers: [
-          tf.layers.multiHeadAttention({
-            numHeads: this.config.numHeads,
-            keyDim: this.config.hiddenDim / this.config.numHeads,
+          tf.layers.dense({
+            units: this.config.hiddenDim,
+            activation: 'linear',
+            useBias: true
           }),
           tf.layers.layerNormalization(),
           tf.layers.dense({ units: this.config.ffDimension, activation: 'gelu' }),
@@ -84,9 +89,7 @@ export class TitanMemoryModel implements IMemoryModel {
     });
 
     // Optimizer with gradient clipping
-    this.optimizer = tf.train.adam(this.config.learningRate, undefined, {
-      clipValue: this.config.gradientClip
-    });
+    this.optimizer = tf.train.adam(this.config.learningRate);
   }
 
   private initializeMemoryState(): void {
@@ -104,15 +107,19 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   public async encodeText(text: string): Promise<tf.Tensor1D> {
-    const tokens = await this.tokenizer.tokenize(text);
-    const input = this.padSequence(tokens);
+    if (!this.tokenizer) {
+      const vocabulary = await this.loadDefaultVocabulary();
+      this.tokenizer = new Tokenizer(vocabulary);
+    }
+    const encoded = await this.tokenizer.encode(text);
+    const input = this.padSequence(Array.from(encoded));
 
     return tf.tidy(() => {
       let encoding = tf.tensor2d([input], [1, this.config.maxSequenceLength]);
       for (const layer of this.transformerStack) {
         encoding = layer.apply(encoding) as tf.Tensor2D;
       }
-      return tf.mean(encoding, 1).squeeze();
+      return tf.mean(encoding, 1).squeeze() as tf.Tensor1D;
     });
   }
 
@@ -120,6 +127,16 @@ export class TitanMemoryModel implements IMemoryModel {
     return tokens
       .slice(0, this.config.maxSequenceLength)
       .concat(Array(this.config.maxSequenceLength - tokens.length).fill(0));
+  }
+
+  private async loadDefaultVocabulary(): Promise<[string, number][]> {
+    // This is a simplified vocabulary. In production, load from a file or API
+    return [
+      ['[PAD]', 0],
+      ['[UNK]', 1],
+      ...('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-_\'"`()[]{}:;/\\+=<>'.split('')
+        .map((char, i) => [char, i + 2] as [string, number]))
+    ];
   }
 
   public async storeMemory(text: string): Promise<void> {
@@ -140,7 +157,7 @@ export class TitanMemoryModel implements IMemoryModel {
       const expanded = embedding.reshape([1, -1]);
       return tf.matMul(this.memoryState.shortTerm, expanded)
         .div(tf.norm(this.memoryState.shortTerm, 2, 1).mul(tf.norm(expanded)))
-        .squeeze();
+        .squeeze() as tf.Tensor1D;
     });
   }
 
@@ -169,19 +186,23 @@ export class TitanMemoryModel implements IMemoryModel {
   private checkPruning(): void {
     this.stepCount++;
     if (this.stepCount % this.config.pruningInterval === 0) {
-      this.adaptivePruning();
+      this.pruneMemory(this.memoryState, this.config.similarityThreshold);
     }
   }
 
-  public adaptivePruning(): void {
-    tf.tidy(() => {
+  public pruneMemory(memoryState: IMemoryState, threshold: number): IMemoryState {
+    return tf.tidy(() => {
       const relevance = this.computeMemoryRelevance();
       const { indices } = tf.topk(relevance, this.config.memorySlots);
 
-      this.memoryState.shortTerm = tf.gather(this.memoryState.shortTerm, indices);
-      this.memoryState.longTerm = tf.gather(this.memoryState.longTerm, indices);
-      this.memoryState.meta = tf.gather(this.memoryState.meta, indices);
-      this.memoryState.accessCounts = tf.gather(this.memoryState.accessCounts, indices);
+      return {
+        shortTerm: tf.gather(memoryState.shortTerm, indices) as tf.Tensor2D,
+        longTerm: tf.gather(memoryState.longTerm, indices) as tf.Tensor2D,
+        meta: tf.gather(memoryState.meta, indices) as tf.Tensor2D,
+        timestamps: tf.gather(memoryState.timestamps, indices) as tf.Tensor1D,
+        accessCounts: tf.gather(memoryState.accessCounts, indices) as tf.Tensor1D,
+        surpriseHistory: tf.gather(memoryState.surpriseHistory, indices) as tf.Tensor1D
+      };
     });
   }
 
@@ -194,7 +215,7 @@ export class TitanMemoryModel implements IMemoryModel {
         this.config.surpriseDecay
       );
 
-      return tf.addN([recency, frequency, surprise]);
+      return tf.addN([recency, frequency, surprise]) as tf.Tensor1D;
     });
   }
 
@@ -204,58 +225,67 @@ export class TitanMemoryModel implements IMemoryModel {
 
     const { indices } = tf.topk(similarities, topK);
     return indices.arraySync().map(i =>
-      this.memoryState.shortTerm.slice([i, 0], [1, -1])
+      this.memoryState.shortTerm.slice([i, 0], [1, -1]) as tf.Tensor2D
     );
   }
 
   public forward(x: ITensor, memoryState: IMemoryState): { predicted: ITensor; memoryUpdate: IMemoryUpdateResult } {
-    return tf.tidy(() => {
-      const input = unwrapTensor(x) as tf.Tensor2D;
-      let transformed = input;
+    const input = unwrapTensor(x) as tf.Tensor2D;
+    let transformed = input;
+    const tensorsToDispose: tf.Tensor[] = [];
 
+    try {
       // Process through transformer stack
       for (const layer of this.transformerStack) {
-        transformed = layer.apply(transformed) as tf.Tensor2D;
+        const newTransformed = layer.apply(transformed) as tf.Tensor2D;
+        if (transformed !== input) {
+          tensorsToDispose.push(transformed);
+        }
+        transformed = newTransformed;
       }
 
       // Memory attention mechanisms
       const memoryQuery = this.memoryProjector.apply(transformed) as tf.Tensor2D;
+      tensorsToDispose.push(memoryQuery);
+
       const attention = this.computeMemoryAttention(memoryQuery);
+      tensorsToDispose.push(attention.keys, attention.values, attention.scores);
 
       // Surprise-gated memory update
-      const surprise = this.computeSurprise(transformed, attention.values);
+      const surprise = this.computeSurprise(transformed, attention.values as tf.Tensor2D);
+      tensorsToDispose.push(surprise.immediate, surprise.accumulated);
+
       const updateGate = tf.sigmoid(tf.mul(surprise.immediate, 0.5));
+      tensorsToDispose.push(updateGate);
 
       const newShortTerm = tf.add(
         tf.mul(memoryState.shortTerm, tf.sub(1, updateGate)),
         tf.mul(attention.values, updateGate)
-      );
+      ) as tf.Tensor2D;
 
-      // Update surprise history
-      this.memoryState.surpriseHistory = tf.add(
-        tf.mul(this.memoryState.surpriseHistory, this.config.surpriseDecay),
-        surprise.accumulated
-      );
+      const newState = {
+        ...memoryState,
+        shortTerm: newShortTerm
+      };
 
       return {
-        predicted: transformed,
+        predicted: wrapTensor(transformed),
         memoryUpdate: {
-          newState: {
-            shortTerm: newShortTerm,
-            longTerm: memoryState.longTerm,
-            meta: memoryState.meta
-          },
+          newState,
           attention,
           surprise
         }
       };
-    });
+    } finally {
+      tensorsToDispose.forEach(t => t.dispose());
+    }
   }
 
   private computeMemoryAttention(query: tf.Tensor2D): IAttentionBlock {
     return tf.tidy(() => {
-      const keys = tf.matMul(this.memoryState.shortTerm, this.similarityNetwork.layers[0].kernel);
-      const values = tf.matMul(this.memoryState.shortTerm, this.similarityNetwork.layers[1].kernel);
+      const weights = this.similarityNetwork.getWeights();
+      const keys = tf.matMul(this.memoryState.shortTerm, weights[0] as tf.Tensor2D);
+      const values = tf.matMul(this.memoryState.shortTerm, weights[1] as tf.Tensor2D);
 
       const scores = tf.softmax(tf.matMul(query, keys.transpose()));
       const attended = tf.matMul(scores, values);
@@ -282,11 +312,15 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   public trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): { loss: ITensor; gradients: IModelGradients } {
-    return tf.tidy(() => {
-      const { predicted, memoryUpdate } = this.forward(x_t, memoryState);
-      const target = unwrapTensor(x_next) as tf.Tensor2D;
+    const { predicted, memoryUpdate } = this.forward(x_t, memoryState);
+    const target = unwrapTensor(x_next) as tf.Tensor2D;
 
-      // Composite loss function
+    const variables = this.transformerStack.flatMap(layer => layer.getWeights())
+      .concat(this.memoryProjector.getWeights())
+      .concat(this.similarityNetwork.getWeights())
+      .map(w => tf.variable(w)) as tf.Variable[];
+
+    const { value: loss, grads } = this.optimizer.computeGradients(() => {
       const predictionLoss = tf.losses.meanSquaredError(target, predicted);
       const surpriseLoss = tf.mul(tf.mean(memoryUpdate.surprise.immediate), 0.1);
       const diversityLoss = tf.neg(tf.mean(tf.square(tf.matMul(
@@ -294,25 +328,41 @@ export class TitanMemoryModel implements IMemoryModel {
         this.memoryState.shortTerm.transpose()
       ))));
 
-      const totalLoss = tf.addN([predictionLoss, surpriseLoss, diversityLoss]);
+      return tf.add(predictionLoss, tf.add(surpriseLoss, diversityLoss)) as tf.Scalar;
+    }, variables);
 
-      // Gradient handling
-      const gradients = this.optimizer.computeGradients(() => totalLoss);
-      this.optimizer.applyGradients(gradients);
+    this.optimizer.applyGradients(grads);
 
-      return {
-        loss: totalLoss,
-        gradients: this.processGradients(gradients)
-      };
+    return {
+      loss,
+      gradients: {
+        shortTerm: grads['shortTerm'] || tf.zeros([0]),
+        longTerm: grads['longTerm'] || tf.zeros([0]),
+        meta: grads['meta'] || tf.zeros([0])
+      }
+    };
+  }
+
+  public updateMetaMemory(surprise: ISurpriseMetrics, context: ITensor): ITensor {
+    return tf.tidy(() => {
+      const surpriseGate = tf.sigmoid(surprise.immediate);
+      return tf.add(
+        tf.mul(this.memoryState.meta, tf.sub(1, surpriseGate)),
+        tf.mul(context, surpriseGate)
+      );
     });
   }
 
-  private processGradients(gradients: tf.NamedTensorMap): IModelGradients {
-    return {
-      shortTerm: gradients['shortTerm'],
-      longTerm: gradients['longTerm'],
-      meta: gradients['meta']
-    };
+  public manifoldStep(base: ITensor, velocity: ITensor): ITensor {
+    return tf.tidy(() => {
+      const norm = tf.norm(velocity);
+      const normalized = tf.div(velocity, norm);
+      return tf.add(base, tf.mul(normalized, this.config.learningRate));
+    });
+  }
+
+  public getConfig(): TitanMemoryConfig {
+    return { ...this.config };
   }
 
   public async saveModel(path: string): Promise<void> {
@@ -325,16 +375,31 @@ export class TitanMemoryModel implements IMemoryModel {
     await fs.writeFile(path, JSON.stringify(modelData, null, 2));
   }
 
-  private async getWeightData(): Promise<Record<string, tf.Tensor>> {
-    return {
-      shortTerm: this.memoryState.shortTerm,
-      longTerm: this.memoryState.longTerm,
-      meta: this.memoryState.meta,
-      ...this.transformerStack.map((layer, i) => ({
-        [`transformer_${i}_weights`]: layer.getWeights()
-      })),
-      similarity_network: this.similarityNetwork.getWeights()
-    };
+  public async save(modelPath: string, weightsPath: string): Promise<void> {
+    await this.saveModel(modelPath);
+    await fs.writeFile(weightsPath, JSON.stringify(await this.getWeightData(), null, 2));
+  }
+
+  private async getWeightData(): Promise<Record<string, number[]>> {
+    const weights: Record<string, number[]> = {};
+
+    // Save transformer stack weights
+    this.transformerStack.forEach((layer, i) => {
+      layer.getWeights().forEach((w, j) => {
+        weights[`transformer_${i}_${j}`] = Array.from(w.dataSync());
+      });
+    });
+
+    // Save other components
+    this.memoryProjector.getWeights().forEach((w, i) => {
+      weights[`projector_${i}`] = Array.from(w.dataSync());
+    });
+
+    this.similarityNetwork.getWeights().forEach((w, i) => {
+      weights[`similarity_${i}`] = Array.from(w.dataSync());
+    });
+
+    return weights;
   }
 
   public async loadModel(path: string): Promise<void> {
@@ -345,25 +410,33 @@ export class TitanMemoryModel implements IMemoryModel {
     this.initializeComponents();
     this.initializeMemoryState();
 
-    for (const [name, weightData] of Object.entries(weights)) {
-      const tensor = tf.tensor(weightData);
-      if (name.startsWith('transformer')) {
-        const layerIndex = parseInt(name.split('_')[1]);
-        this.transformerStack[layerIndex].setWeights(tensor);
-      } else {
-        this.memoryState[name] = tensor;
+    // Load weights
+    Object.entries(weights).forEach(([name, weightData]) => {
+      const tensor = tf.tensor(weightData as number[]);
+      const [component, layerIndex, weightIndex] = name.split('_');
+
+      switch (component) {
+        case 'transformer':
+          this.transformerStack[Number(layerIndex)].setWeights([tensor]);
+          break;
+        case 'projector':
+          this.memoryProjector.setWeights([tensor]);
+          break;
+        case 'similarity':
+          this.similarityNetwork.setWeights([tensor]);
+          break;
       }
-    }
+    });
   }
 
-  // Additional helper methods
   public getMemorySnapshot(): Record<string, tf.Tensor> {
     return {
       shortTerm: this.memoryState.shortTerm.clone(),
       longTerm: this.memoryState.longTerm.clone(),
       meta: this.memoryState.meta.clone(),
       timestamps: this.memoryState.timestamps.clone(),
-      accessCounts: this.memoryState.accessCounts.clone()
+      accessCounts: this.memoryState.accessCounts.clone(),
+      surpriseHistory: this.memoryState.surpriseHistory.clone()
     };
   }
 

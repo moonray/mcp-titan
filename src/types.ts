@@ -1,88 +1,92 @@
 /**
- * @fileoverview Core type definitions for the Titans memory architecture.
+ * @fileoverview Core type definitions for Titan Memory Architecture
  * This file defines the interfaces and types used throughout the implementation
  * of the Titans memory model, including tensor operations, memory states, and
  * model interactions.
  */
 
-import * as tf from '@tensorflow/tfjs';
-import { z } from "zod";
+import * as tf from '@tensorflow/tfjs-node';
+import { z } from 'zod';
+
+// Core Tensor Operations
+export type ITensor = tf.Tensor;
+export type TensorContainer = { [key: string]: tf.Tensor | TensorContainer };
 
 /**
- * Basic interface for an in-house tensor object that wraps TensorFlow.js tensors.
- * Provides essential operations while maintaining compatibility with tf.TensorContainerObject.
+ * Creates a wrapped tensor from a TensorFlow.js tensor.
+ * @param tensor TensorFlow.js tensor to wrap
+ * @returns Wrapped tensor
  */
-export type ITensor = tf.Tensor;
+export const wrapTensor = (t: tf.Tensor) => t;
+
+/**
+ * Unwraps a tensor to get the underlying TensorFlow.js tensor.
+ * @param tensor Tensor to unwrap
+ * @returns Underlying TensorFlow.js tensor
+ */
+export const unwrapTensor = (t: ITensor) => t;
 
 /**
  * Interface defining the core tensor operations available in the system.
  * Provides a subset of TensorFlow.js operations needed for the Titans implementation.
  */
 export interface ITensorOps {
-  /** Creates a new tensor with the specified data and optional shape */
   tensor(data: number[], shape?: number[]): ITensor;
-  /** Creates a 1-dimensional tensor */
   tensor1d(data: number[]): ITensor;
-  /** Creates a scalar tensor */
   scalar(value: number): ITensor;
-  /** Creates a tensor filled with zeros */
   zeros(shape: number[]): ITensor;
-  /** Creates a tensor with random normal values */
   randomNormal(shape: number[]): ITensor;
-  /** Creates a trainable variable */
   variable(tensor: ITensor): ITensor;
-  /** Executes a function while cleaning up intermediate tensors */
   tidy<T extends tf.TensorContainer>(fn: () => T): T;
-  /** Training operations */
   train: {
     adam: (learningRate: number) => {
       minimize: (lossFn: () => tf.Scalar) => ITensor;
     };
   };
-  /** Concatenates tensors along an axis */
   concat(tensors: ITensor[], axis?: number): ITensor;
-  /** Matrix multiplication */
   matMul(a: ITensor, b: ITensor): ITensor;
-  /** Element-wise subtraction */
   sub(a: ITensor, b: ITensor): ITensor;
-  /** Element-wise addition */
   add(a: ITensor, b: ITensor): ITensor;
-  /** Element-wise multiplication */
   mul(a: ITensor, b: ITensor): ITensor;
-  /** Element-wise division */
   div(a: ITensor, b: ITensor): ITensor;
-  /** ReLU activation function */
   relu(x: ITensor): ITensor;
-  /** Sigmoid activation function */
   sigmoid(x: ITensor): ITensor;
-  /** Tanh activation function */
   tanh(x: ITensor): ITensor;
-  /** Computes mean along specified axis */
   mean(x: ITensor, axis?: number): ITensor;
-  /** Computes sum along specified axis */
   sum(x: ITensor, axis?: number): ITensor;
-  /** Element-wise square root */
   sqrt(x: ITensor): ITensor;
-  /** Element-wise exponential */
   exp(x: ITensor): ITensor;
-  /** Element-wise natural logarithm */
   log(x: ITensor): ITensor;
-  /** Releases memory for all tensors */
   dispose(): void;
-  /** Returns current memory usage statistics */
   memory(): { numTensors: number; numDataBuffers: number; numBytes: number };
 }
+
+// Memory Configuration Schema
+export const TitanMemoryConfigSchema = z.object({
+  inputDim: z.number().int().positive().default(768),
+  hiddenDim: z.number().int().positive().default(512),
+  memoryDim: z.number().int().positive().default(1024),
+  transformerLayers: z.number().int().positive().max(12).default(6),
+  numHeads: z.number().int().positive().default(8),
+  ffDimension: z.number().int().positive().default(2048),
+  dropoutRate: z.number().min(0).max(0.9).default(0.1),
+  maxSequenceLength: z.number().int().positive().default(512),
+  memorySlots: z.number().int().positive().default(5000),
+  similarityThreshold: z.number().min(0).max(1).default(0.65),
+  surpriseDecay: z.number().min(0).max(1).default(0.9),
+  pruningInterval: z.number().int().positive().default(1000),
+  gradientClip: z.number().positive().default(1.0),
+});
+
+export type TitanMemoryConfig = z.infer<typeof TitanMemoryConfigSchema>;
 
 /**
  * Represents an attention block in the Titans architecture.
  * Contains the key-value pairs and attention scores used in the memory mechanism.
  */
-export interface IAttentionBlock extends TensorContainer {
-  /** Keys used for attention computation */
+export interface IAttentionBlock {
   keys: ITensor;
-  /** Values to be attended over */
   values: ITensor;
-  /** Computed attention scores */
   scores: ITensor;
 }
 
@@ -90,174 +94,72 @@ export interface IAttentionBlock extends TensorContainer {
  * Tracks both immediate and accumulated surprise metrics.
  * Used to guide memory updates and test-time learning.
  */
-export interface ISurpriseMetrics extends TensorContainer {
-  /** Immediate surprise from current prediction */
+export interface ISurpriseMetrics {
   immediate: ITensor;
-  /** Accumulated surprise over time */
   accumulated: ITensor;
 }
 
 /**
- * Represents the three-tier memory state in the Titans architecture.
- * Combines short-term, long-term, and meta-memory components.
+ * Represents the memory state in the Titans architecture.
+ * Combines short-term, long-term, and meta-memory components with temporal dynamics.
  */
-export interface IMemoryState extends TensorContainer {
-  /** Short-term memory for immediate context */
+export interface IMemoryState {
   shortTerm: ITensor;
-  /** Long-term memory for persistent information */
   longTerm: ITensor;
-  /** Meta-memory for learning to memorize */
   meta: ITensor;
+  timestamps: ITensor;
+  accessCounts: ITensor;
+  surpriseHistory: ITensor;
 }
 
 /**
  * Result of a memory update operation, containing the new memory state
  * and associated attention and surprise metrics.
  */
-export interface IMemoryUpdateResult extends TensorContainer {
-  /** Updated memory state after forward pass */
+export interface IMemoryUpdateResult {
   newState: IMemoryState;
-  /** Attention computations used in the update */
   attention: IAttentionBlock;
-  /** Computed surprise metrics */
   surprise: ISurpriseMetrics;
 }
 
 /**
  * Gradients computed for each memory component during training.
- * Used to update the model's parameters.
  */
-export interface IModelGradients extends TensorContainer {
-  /** Gradients for short-term memory */
+export interface IModelGradients {
   shortTerm: ITensor;
-  /** Gradients for long-term memory */
   longTerm: ITensor;
-  /** Gradients for meta-memory */
   meta: ITensor;
 }
 
 /**
  * Core interface for the Titans memory model.
- * Defines the essential methods for forward passes, training, and memory management.
  */
 export interface IMemoryModel {
-  /**
-   * Performs a forward pass through the model.
-   * @param x Input tensor
-   * @param memoryState Current memory state
-   * @returns Predicted output and memory updates
-   */
   forward(x: ITensor, memoryState: IMemoryState): {
     predicted: ITensor;
     memoryUpdate: IMemoryUpdateResult;
   };
 
-  /**
-   * Performs a training step.
-   * @param x_t Current input
-   * @param x_next Next input (target)
-   * @param memoryState Current memory state
-   * @returns Loss and computed gradients
-   */
   trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): {
     loss: ITensor;
     gradients: IModelGradients;
   };
 
-  /**
-   * Updates meta-memory based on surprise metrics.
-   * @param surprise Current surprise metrics
-   * @param context Context tensor
-   * @returns Updated meta-memory
-   */
   updateMetaMemory(surprise: ISurpriseMetrics, context: ITensor): ITensor;
-
-  /**
-   * Prunes memory based on importance scores.
-   * @param memoryState Current memory state
-   * @param threshold Pruning threshold
-   * @returns Pruned memory state
-   */
   pruneMemory(memoryState: IMemoryState, threshold: number): IMemoryState;
-
-  /**
-   * Performs a manifold optimization step.
-   * @param base Base point on manifold
-   * @param velocity Update direction
-   * @returns Updated point on manifold
-   */
   manifoldStep(base: ITensor, velocity: ITensor): ITensor;
-
-  /**
-   * Saves model weights to disk.
-   * @param path File path
-   */
   saveModel(path: string): Promise<void>;
-
-  /**
-   * Loads model weights from disk.
-   * @param path File path
-   */
   loadModel(path: string): Promise<void>;
-
-  /**
-   * Returns current model configuration.
-   */
   getConfig(): any;
-
-  /**
-   * Saves the entire model to disk.
-   * @param modelPath Path to save the model
-   * @param weightsPath Path to save the model weights
-   */
   save(modelPath: string, weightsPath: string): Promise<void>;
+  getMemorySnapshot(): Record<string, tf.Tensor>;
 }
 
-/**
- * Wrapper class for TensorFlow.js tensors.
- * Provides a consistent interface for tensor operations while managing underlying TF.js tensors.
- */
-export interface TensorWrapper extends tf.Tensor {
-  __brand: 'TensorWrapper';
-}
-
-/**
- * Creates a wrapped tensor from a TensorFlow.js tensor.
- * @param tensor TensorFlow.js tensor to wrap
- * @returns Wrapped tensor
- */
-export function wrapTensor(tensor: tf.Tensor): TensorWrapper {
-  return tensor as TensorWrapper;
-}
-
-/**
- * Unwraps a tensor to get the underlying TensorFlow.js tensor.
- * @param tensor Tensor to unwrap
- * @returns Underlying TensorFlow.js tensor
- */
-export function unwrapTensor(tensor: ITensor | TensorWrapper): tf.Tensor {
-  return tensor;
-}
-
-/**
- * Zod schema for memory storage input validation.
- */
-export const StoreMemoryInput = z.object({
-  subject: z.string(),
-  relationship: z.string(),
-  object: z.string()
-});
-
-/**
- * Zod schema for memory recall input validation.
- */
-export const RecallMemoryInput = z.object({
-  query: z.string()
-});
-
+// Server & Transport Types
 export interface ServerCapabilities {
-  tools: boolean;
-  memory: boolean;
+  neuralMemory: boolean;
+  onlineLearning: boolean;
+  surpriseDetection: boolean;
 }
 
 export interface CallToolRequest {
@@ -271,26 +173,25 @@ export interface CallToolResult {
   error?: string;
 }
 
-export interface Server {
-  capabilities: ServerCapabilities;
-  handleRequest(request: CallToolRequest): Promise<CallToolResult>;
-  connect(transport: Transport): Promise<void>;
-}
-
 export interface Transport {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   onRequest(handler: (request: CallToolRequest) => Promise<CallToolResult>): void;
+  send?(message: unknown): void;
 }
 
-export interface WebSocketTransport extends Transport {
-  // Additional WebSocket-specific methods if needed
+export interface McpServer {
+  tool(name: string, schema: z.ZodRawShape | string, handler: Function): void;
+  connect(transport: Transport): Promise<void>;
 }
 
-export interface StdioServerTransport extends Transport {
-  // Additional stdio-specific methods if needed
-}
+// Memory Operation Schemas
+export const StoreMemoryInput = z.object({
+  subject: z.string(),
+  relationship: z.string(),
+  object: z.string()
+});
 
-export interface TensorContainer {
-  [key: string]: tf.Tensor | TensorContainer;
-}
+export const RecallMemoryInput = z.object({
+  query: z.string()
+});
