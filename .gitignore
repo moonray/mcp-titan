@@ -1,6 +1,17 @@
 
 /node_modules
 /build
+/build/*
+build/
+
+package-lock.json
+
+.titan_memory/
+.titan_memory/*
+
+
+/node_modules
+/build
 package-lock.json
 .titan_memory
 .titan_memory/model.json
