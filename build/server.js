@@ -1,123 +1,65 @@
-import express from 'express';
-import bodyParser from 'body-parser';
+import * as readline from 'readline';
 import WebSocket from 'ws';
 import { z } from 'zod';
-import readline from 'readline';
-// Schema definitions
-export const CallToolRequestSchema = z.object({
-    name: z.string(),
-    parameters: z.record(z.unknown())
-});
-const CallToolResultSchema = z.object({
-    success: z.boolean(),
-    result: z.unknown().optional(),
-    error: z.string().optional()
-});
-export class MCPServer {
-    constructor(name, version, capabilities) {
-        this.errorHandler = null;
-        this.name = name;
-        this.version = version;
-        this.capabilities = capabilities;
-    }
-    onError(handler) {
-        this.errorHandler = handler;
-    }
-    onToolCall(handler, p0, p1) {
-        this.requestHandler = handler;
-    }
-    async connect(transport) {
-        await transport.connect();
-    }
-    handleError(error) {
-        if (this.errorHandler) {
-            this.errorHandler(error);
-        }
-        else {
-            console.error('Unhandled server error:', error);
-        }
-    }
-    async handleRequest(request) {
-        if (!this.requestHandler) {
-            return {
-                success: false,
-                error: 'No request handler registered'
-            };
-        }
-        try {
-            // Validate request
-            const validatedRequest = CallToolRequestSchema.parse(request);
-            return await this.requestHandler(validatedRequest);
-        }
-        catch (error) {
-            return {
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error occurred'
-            };
-        }
-    }
-    setRequestHandler(handler) {
-        this.requestHandler = handler;
-    }
-}
+/**
+ * WebSocket transport implementation for MCP server
+ */
 export class WebSocketTransport {
+    url;
+    ws;
+    requestHandler;
     constructor(url) {
-        if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
-            throw new Error('Invalid WebSocket URL: must start with ws:// or wss://');
-        }
+        this.url = url;
         this.ws = new WebSocket(url);
     }
     async connect() {
         return new Promise((resolve, reject) => {
-            this.ws.onopen = () => resolve();
-            this.ws.onerror = (error) => reject(error);
-            this.ws.onmessage = async (event) => {
+            this.ws.on('open', resolve);
+            this.ws.on('error', reject);
+            this.ws.on('message', async (data) => {
                 if (!this.requestHandler)
                     return;
                 try {
-                    const request = JSON.parse(event.data.toString());
-                    const validatedRequest = CallToolRequestSchema.parse(request);
-                    const response = await this.requestHandler(validatedRequest);
-                    this.ws.send(JSON.stringify(response));
+                    const request = JSON.parse(data.toString());
+                    const result = await this.requestHandler(request);
+                    this.ws.send(JSON.stringify(result));
                 }
                 catch (error) {
                     this.ws.send(JSON.stringify({
                         success: false,
-                        error: error instanceof Error ? error.message : 'Unknown error occurred'
+                        error: error instanceof Error ? error.message : 'Invalid request'
                     }));
                 }
-            };
+            });
         });
     }
     async disconnect() {
         this.ws.close();
-        return Promise.resolve();
     }
     onRequest(handler) {
         this.requestHandler = handler;
     }
-}
-export class StdioTransport {
-    constructor() {
-        this.readline = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        });
+    send(message) {
+        this.ws.send(JSON.stringify(message));
     }
+}
+/**
+ * Standard I/O transport implementation for MCP server
+ */
+export class StdioServerTransport {
+    rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+    requestHandler;
     async connect() {
-        this.readline.on('line', async (line) => {
-            if (!this.requestHandler) {
-                console.log(JSON.stringify({
-                    success: false,
-                    error: 'No handler registered'
-                }));
+        this.rl.on('line', async (line) => {
+            if (!this.requestHandler)
                 return;
-            }
             try {
-                const rawRequest = JSON.parse(line);
-                const request = CallToolRequestSchema.parse(rawRequest);
-                const response = await this.requestHandler(request);
-                console.log(JSON.stringify(response));
+                const request = JSON.parse(line);
+                const result = await this.requestHandler(request);
+                console.log(JSON.stringify(result));
             }
             catch (error) {
                 console.log(JSON.stringify({
@@ -129,117 +71,75 @@ export class StdioTransport {
         return Promise.resolve();
     }
     async disconnect() {
-        this.readline.close();
-        return Promise.resolve();
+        this.rl.close();
     }
     onRequest(handler) {
         this.requestHandler = handler;
     }
-}
-export class StdioServerTransportImpl {
-    onRequest(handler) {
-        this.requestHandler = handler;
-    }
-    async connect() {
-        // Setup stdin/stdout handlers
-        process.stdin.setEncoding('utf8');
-        process.stdin.on('data', this.handleInput.bind(this));
-    }
-    async disconnect() {
-        process.stdin.removeAllListeners('data');
-    }
-    handleInput(data) {
-        if (!this.requestHandler)
-            return;
-        try {
-            const message = JSON.parse(data);
-            // Handle message...
-            process.stdout.write(JSON.stringify({ type: 'response', data: message }) + '\n');
-        }
-        catch (error) {
-            process.stderr.write(`Error handling input: ${error}\n`);
-        }
+    send(message) {
+        console.log(JSON.stringify(message));
     }
 }
-export class TitanExpressServer {
-    constructor(port = 3000) {
-        this.model = null;
-        this.memoryVec = null;
-        this.port = port;
-        this.app = express();
-        this.setupMiddleware();
-        this.setupRoutes();
-        const capabilities = {
-            tools: true,
-            memory: true
-        };
-        this.server = new MCPServer('titan-express', '0.1.0', capabilities);
-        this.setupHandlers();
+/**
+ * Enhanced MCP Server Implementation
+ */
+export class McpServerImpl {
+    tools = new Map();
+    name;
+    version;
+    constructor(config) {
+        this.name = config.name;
+        this.version = config.version;
     }
-    setupMiddleware() {
-        this.app.use(bodyParser.json());
+    tool(name, schema, handler) {
+        const zodSchema = typeof schema === 'string'
+            ? z.object({})
+            : z.object(schema);
+        this.tools.set(name, async (params) => {
+            const validated = zodSchema.parse(params);
+            return handler(validated);
+        });
     }
-    setupHandlers() {
-        this.server.handleRequest = async (request) => {
-            try {
-                switch (request.name) {
-                    case 'storeMemory': {
-                        const { subject, relationship, object } = request.parameters;
-                        // Implementation
-                        return {
-                            success: true,
-                            result: { stored: true }
-                        };
-                    }
-                    case 'recallMemory': {
-                        const { query } = request.parameters;
-                        // Implementation
-                        return {
-                            success: true,
-                            result: { results: [] }
-                        };
-                    }
-                    default:
-                        throw new Error(`Unknown tool: ${request.name}`);
-                }
-            }
-            catch (error) {
-                const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    async connect(transport) {
+        transport.onRequest(async (request) => {
+            const handler = this.tools.get(request.name);
+            if (!handler) {
                 return {
                     success: false,
-                    error: `Error: ${errorMessage}`
+                    error: `Tool ${request.name} not found`,
+                    content: [{
+                            type: "text",
+                            text: `Tool ${request.name} not found`
+                        }]
                 };
             }
-        };
-    }
-    setupRoutes() {
-        this.app.get('/status', (req, res) => {
-            res.json({
-                status: 'ok',
-                model: this.model ? 'initialized' : 'not initialized'
-            });
+            try {
+                return await handler(request.parameters);
+            }
+            catch (error) {
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    content: [{
+                            type: "text",
+                            text: error instanceof Error ? error.message : 'Unknown error'
+                        }]
+                };
+            }
         });
-    }
-    async start() {
-        // Connect stdio transport
-        const stdioTransport = new StdioServerTransportImpl();
-        await this.server.connect(stdioTransport);
-        // Start HTTP server
-        return new Promise((resolve, reject) => {
-            const server = this.app.listen(this.port, () => {
-                console.log(`Server running on port ${this.port}`);
-                resolve();
-            });
-            server.on('error', (error) => {
-                reject(error);
-            });
+        await transport.connect();
+        // Send server info
+        transport.send?.({
+            jsonrpc: "2.0",
+            method: "server_info",
+            params: {
+                name: this.name,
+                version: this.version,
+                capabilities: {
+                    tools: true,
+                    memory: true
+                }
+            }
         });
-    }
-    async stop() {
-        if (this.memoryVec) {
-            this.memoryVec.dispose();
-            this.memoryVec = null;
-        }
     }
 }
-//# sourceMappingURL=server.js.map

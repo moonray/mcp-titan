@@ -81,27 +81,7 @@ export const TitanMemoryConfigSchema = z.object({
 export type TitanMemoryConfig = z.infer<typeof TitanMemoryConfigSchema>;
 
 /**
- * Represents an attention block in the Titans architecture.
- * Contains the key-value pairs and attention scores used in the memory mechanism.
- */
-export interface IAttentionBlock {
-  keys: ITensor;
-  values: ITensor;
-  scores: ITensor;
-}
-
-/**
- * Tracks both immediate and accumulated surprise metrics.
- * Used to guide memory updates and test-time learning.
- */
-export interface ISurpriseMetrics {
-  immediate: ITensor;
-  accumulated: ITensor;
-}
-
-/**
- * Represents the memory state in the Titans architecture.
- * Combines short-term, long-term, and meta-memory components with temporal dynamics.
+ * Interface for memory state in the Titans architecture.
  */
 export interface IMemoryState {
   shortTerm: ITensor;
@@ -113,8 +93,24 @@ export interface IMemoryState {
 }
 
 /**
- * Result of a memory update operation, containing the new memory state
- * and associated attention and surprise metrics.
+ * Interface for attention block in transformer architecture.
+ */
+export interface IAttentionBlock {
+  keys: ITensor;
+  values: ITensor;
+  scores: ITensor;
+}
+
+/**
+ * Interface for surprise metrics in memory updates.
+ */
+export interface ISurpriseMetrics {
+  immediate: ITensor;
+  accumulated: ITensor;
+}
+
+/**
+ * Interface for memory update results.
  */
 export interface IMemoryUpdateResult {
   newState: IMemoryState;
@@ -123,7 +119,7 @@ export interface IMemoryUpdateResult {
 }
 
 /**
- * Gradients computed for each memory component during training.
+ * Interface for model gradients.
  */
 export interface IModelGradients {
   shortTerm: ITensor;
@@ -132,7 +128,35 @@ export interface IModelGradients {
 }
 
 /**
- * Core interface for the Titans memory model.
+ * Interface for memory manager operations.
+ */
+export interface IMemoryManager {
+  validateVectorShape(tensor: tf.Tensor, expectedShape: number[]): boolean;
+  encryptTensor(tensor: tf.Tensor): Buffer;
+  decryptTensor(encrypted: Buffer, shape: number[]): tf.Tensor;
+  wrapWithMemoryManagement<T extends tf.TensorContainer>(fn: () => T): T;
+  wrapWithMemoryManagementAsync<T>(fn: () => Promise<T>): Promise<T>;
+  dispose(): void;
+}
+
+/**
+ * Interface for vector processing operations.
+ */
+export interface IVectorProcessor {
+  processInput(input: number[] | string | tf.Tensor): tf.Tensor;
+  validateAndNormalize(tensor: tf.Tensor, expectedShape: number[]): tf.Tensor;
+  encodeText(text: string, maxLength?: number): Promise<tf.Tensor>;
+}
+
+/**
+ * Interface for automatic memory maintenance operations.
+ */
+export interface IMemoryMaintenance {
+  dispose(): void;
+}
+
+/**
+ * Interface for the memory model.
  */
 export interface IMemoryModel {
   forward(x: ITensor, memoryState: IMemoryState): {
@@ -153,26 +177,44 @@ export interface IMemoryModel {
   getConfig(): any;
   save(modelPath: string, weightsPath: string): Promise<void>;
   getMemorySnapshot(): Record<string, tf.Tensor>;
+  dispose(): void;
 }
 
-// Server & Transport Types
+/**
+ * Interface for server capabilities.
+ */
 export interface ServerCapabilities {
-  neuralMemory: boolean;
-  onlineLearning: boolean;
-  surpriseDetection: boolean;
+  name: string;
+  version: string;
+  description?: string;
+  transport: string;
+  tools: Record<string, {
+    description: string;
+    parameters: Record<string, unknown>;
+  }>;
 }
 
+/**
+ * Interface for tool call requests.
+ */
 export interface CallToolRequest {
   name: string;
   parameters: Record<string, unknown>;
 }
 
+/**
+ * Interface for tool call results.
+ */
 export interface CallToolResult {
-  success: boolean;
-  result?: unknown;
-  error?: string;
+  content: Array<{
+    type: string;
+    text: string;
+  }>;
 }
 
+/**
+ * Interface for transport layer.
+ */
 export interface Transport {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -180,6 +222,9 @@ export interface Transport {
   send?(message: unknown): void;
 }
 
+/**
+ * Interface for MCP server.
+ */
 export interface McpServer {
   tool(name: string, schema: z.ZodRawShape | string, handler: Function): void;
   connect(transport: Transport): Promise<void>;

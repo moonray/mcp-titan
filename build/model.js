@@ -1,264 +1,439 @@
 /**
- * @fileoverview Titans Memory Model Implementation
+ * @fileovertitle Titan Memory Model 2.0 - Neural Memory Architecture with Transformer-XL Inspired Mechanisms
  */
-import * as tf from '@tensorflow/tfjs';
-import { unwrapTensor } from './types.js';
+import * as tf from '@tensorflow/tfjs-node';
+import { unwrapTensor, wrapTensor } from './types.js';
 import * as fs from 'fs/promises';
+import { z } from 'zod';
+// Enhanced configuration schema
+const ModelConfigSchema = z.object({
+    inputDim: z.number().int().positive().default(768),
+    hiddenDim: z.number().int().positive().default(512),
+    memoryDim: z.number().int().positive().default(1024),
+    transformerLayers: z.number().int().positive().max(12).default(6),
+    numHeads: z.number().int().positive().default(8),
+    ffDimension: z.number().int().positive().default(2048),
+    dropoutRate: z.number().min(0).max(0.9).default(0.1),
+    maxSequenceLength: z.number().int().positive().default(512),
+    memorySlots: z.number().int().positive().default(5000),
+    similarityThreshold: z.number().min(0).max(1).default(0.65),
+    surpriseDecay: z.number().min(0).max(1).default(0.9),
+    pruningInterval: z.number().int().positive().default(1000),
+    gradientClip: z.number().positive().default(1.0),
+    learningRate: z.number().positive().default(0.001),
+    vocabSize: z.number().int().positive().default(50000),
+});
 export class TitanMemoryModel {
-    constructor(config = {}) {
-        // Initialize configuration with defaults
-        this.inputDim = config.inputDim || 64;
-        this.hiddenDim = config.hiddenDim || 32;
-        this.memoryDim = config.outputDim || 64;
-        this.learningRate = config.learningRate || 1e-3;
-        this.useManifold = config.useManifold || false;
-        this.momentumFactor = config.momentumFactor || 0.9;
-        this.attentionHeads = config.attentionHeads || 4;
-        this.keyDim = config.keyDim || 32;
-        this.valueDim = config.valueDim || 32;
-        this.surpriseThreshold = config.surpriseThreshold || 0.5;
-        this.metaLearningRate = config.metaLearningRate || 1e-4;
-        this.maxMemorySize = config.maxMemorySize || 1000;
-        // Calculate derived dimensions
-        this.combinedContextSize = this.hiddenDim * 3;
-        this.surpriseInputSize = this.inputDim + this.hiddenDim;
-        this.pruningInputSize = this.inputDim + this.memoryDim + this.hiddenDim;
-        // Initialize parameters with Glorot initialization
-        const glorot = (shape) => {
-            const [fanIn, fanOut] = shape;
-            const scale = Math.sqrt(2.0 / (fanIn + fanOut));
-            return tf.randomNormal(shape, 0, scale);
+    config;
+    transformerStack = [];
+    memoryProjector;
+    similarityNetwork;
+    optimizer;
+    stepCount = 0;
+    vocabulary;
+    reverseVocabulary;
+    // Enhanced memory state with temporal dynamics
+    memoryState = {
+        shortTerm: tf.zeros([0]),
+        longTerm: tf.zeros([0]),
+        meta: tf.zeros([0]),
+        timestamps: tf.zeros([0]),
+        accessCounts: tf.zeros([0]),
+        surpriseHistory: tf.zeros([0])
+    };
+    constructor(config) {
+        this.config = ModelConfigSchema.parse(config || {});
+        this.vocabulary = new Map();
+        this.reverseVocabulary = new Map();
+        this.initializeVocabulary();
+        this.initializeComponents();
+        this.initializeMemoryState();
+    }
+    initializeVocabulary() {
+        // Initialize with special tokens
+        this.vocabulary.set('[PAD]', 0);
+        this.vocabulary.set('[UNK]', 1);
+        this.vocabulary.set('[CLS]', 2);
+        this.vocabulary.set('[SEP]', 3);
+        // Add basic characters and common tokens
+        const basicChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-_\'"`()[]{}:;/\\+=<>'.split('');
+        basicChars.forEach((char, i) => {
+            this.vocabulary.set(char, i + 4);
+        });
+        // Create reverse mapping
+        this.vocabulary.forEach((value, key) => {
+            this.reverseVocabulary.set(value, key);
+        });
+    }
+    async encodeText(text) {
+        return tf.tidy(() => {
+            // Tokenize text into subwords/characters
+            const tokens = this.tokenize(text);
+            // Convert tokens to IDs and pad sequence
+            const tokenIds = this.padSequence(tokens.map(token => this.vocabulary.get(token) || this.vocabulary.get('[UNK]')));
+            // Create tensor and apply embedding
+            const inputTensor = tf.tensor2d([tokenIds], [1, this.config.maxSequenceLength]);
+            let encoding = this.applyPositionalEncoding(inputTensor);
+            // Process through transformer stack
+            for (const layer of this.transformerStack) {
+                encoding = layer.apply(encoding);
+            }
+            // Mean pooling over sequence length
+            return tf.mean(encoding, 1).squeeze();
+        });
+    }
+    tokenize(text) {
+        // Simple character-level tokenization with basic subword units
+        const tokens = [];
+        let currentToken = '';
+        const addToken = () => {
+            if (currentToken) {
+                tokens.push(currentToken);
+                currentToken = '';
+            }
         };
-        // Attention projections
-        this.queryProjection = tf.variable(glorot([this.hiddenDim, this.attentionHeads * this.keyDim]), true, 'queryProjection');
-        this.keyProjection = tf.variable(glorot([this.hiddenDim, this.attentionHeads * this.keyDim]), true, 'keyProjection');
-        this.valueProjection = tf.variable(glorot([this.hiddenDim, this.attentionHeads * this.valueDim]), true, 'valueProjection');
-        this.outputProjection = tf.variable(glorot([this.attentionHeads * this.valueDim, this.hiddenDim]), true, 'outputProjection');
-        // Memory encoders
-        this.shortTermEncoder = tf.variable(glorot([this.hiddenDim, this.inputDim]), true, 'shortTermEncoder');
-        this.longTermEncoder = tf.variable(glorot([this.hiddenDim, this.memoryDim]), true, 'longTermEncoder');
-        this.metaEncoder = tf.variable(glorot([this.hiddenDim, this.hiddenDim]), true, 'metaEncoder');
-        // Memory decoders
-        this.shortTermDecoder = tf.variable(glorot([this.combinedContextSize, this.inputDim]), true, 'shortTermDecoder');
-        this.longTermDecoder = tf.variable(glorot([this.combinedContextSize, this.memoryDim]), true, 'longTermDecoder');
-        this.metaDecoder = tf.variable(glorot([this.combinedContextSize, this.hiddenDim]), true, 'metaDecoder');
-        // Surprise and pruning networks
-        this.surpriseNetwork = tf.variable(glorot([this.surpriseInputSize, 2]), true, 'surpriseNetwork');
-        this.pruningNetwork = tf.variable(glorot([this.pruningInputSize, 1]), true, 'pruningNetwork');
-        // Optimizers
-        this.optimizer = tf.train.adam(this.learningRate);
-        this.metaOptimizer = tf.train.adam(this.metaLearningRate);
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            // Handle special characters
+            if ('.,!?-_\'"`()[]{}:;/\\+=<>'.includes(char)) {
+                addToken();
+                tokens.push(char);
+                continue;
+            }
+            // Handle whitespace
+            if (char === ' ') {
+                addToken();
+                continue;
+            }
+            // Build subword tokens
+            currentToken += char;
+            // Check if current token exists in vocabulary
+            if (this.vocabulary.has(currentToken)) {
+                if (i === text.length - 1 || !this.vocabulary.has(currentToken + text[i + 1])) {
+                    addToken();
+                }
+            }
+        }
+        addToken();
+        return tokens;
     }
-    updateMetaMemory(surprise, context) {
-        throw new Error('Method not implemented.');
+    padSequence(tokens) {
+        const padded = tokens.slice(0, this.config.maxSequenceLength);
+        while (padded.length < this.config.maxSequenceLength) {
+            padded.push(this.vocabulary.get('[PAD]'));
+        }
+        return padded;
     }
-    manifoldStep(base, velocity) {
-        throw new Error('Method not implemented.');
-    }
-    async save(modelPath, weightsPath) {
-        // Ensure the model path has the correct extension
-        const path = modelPath.endsWith('.json') ? modelPath : `${modelPath}.json`;
-        // Use the existing saveModel implementation
-        await this.saveModel(path);
-    }
-    computeAttention(query, keys, values) {
+    applyPositionalEncoding(input) {
         return tf.tidy(() => {
-            // Split projections into heads
-            const splitHeads = (tensor, dim) => tensor.reshape([-1, this.attentionHeads, dim]).transpose([1, 0, 2]);
-            const q = splitHeads(tf.matMul(query, this.queryProjection), this.keyDim);
-            const k = splitHeads(tf.matMul(keys, this.keyProjection), this.keyDim);
-            const v = splitHeads(tf.matMul(values, this.valueProjection), this.valueDim);
-            // Compute attention scores
-            const scores = tf.matMul(q, k.transpose([0, 2, 1]))
-                .div(tf.sqrt(tf.scalar(this.keyDim, 'float32')));
-            const attention = tf.softmax(scores, -1);
-            // Combine heads and project
-            const combined = tf.matMul(attention, v)
-                .transpose([1, 0, 2])
-                .reshape([-1, this.attentionHeads * this.valueDim]);
-            const output = tf.matMul(combined, this.outputProjection);
-            return { keys, values, scores: attention };
+            const position = tf.range(0, input.shape[1]);
+            // Always use config dimension since we're working with 2D tensors
+            const numDimensions = this.config.inputDim;
+            // Create position encodings
+            const positionMatrix = position.expandDims(1);
+            const divTerm = tf.exp(tf.mul(tf.range(0, numDimensions, 2).cast('float32'), tf.scalar(-(Math.log(10000.0) / numDimensions))));
+            const sinTerms = tf.sin(tf.matMul(positionMatrix, divTerm.reshape([1, -1])));
+            const cosTerms = tf.cos(tf.matMul(positionMatrix, divTerm.reshape([1, -1])));
+            const positionalEncoding = tf.concat([sinTerms, cosTerms], 1);
+            // Add positional encoding to input
+            return tf.add(input, positionalEncoding.expandDims(0));
         });
     }
-    computeSurprise(predicted, actual, history) {
-        return tf.tidy(() => {
-            const diff = tf.sub(predicted, actual);
-            const context = tf.concat([diff, history], 1);
-            const surprise = tf.matMul(context, this.surpriseNetwork);
-            const [immediate, accumulated] = tf.split(surprise, 2, 1);
-            return { immediate, accumulated };
+    initializeComponents() {
+        // Transformer-XL inspired recurrent segment
+        this.transformerStack = Array.from({ length: this.config.transformerLayers }, () => tf.sequential({
+            layers: [
+                tf.layers.dense({
+                    units: this.config.hiddenDim,
+                    inputShape: [this.config.inputDim],
+                    activation: 'linear',
+                    useBias: true
+                }),
+                tf.layers.layerNormalization(),
+                tf.layers.dense({ units: this.config.ffDimension, activation: 'gelu' }),
+                tf.layers.dropout({ rate: this.config.dropoutRate }),
+                tf.layers.dense({ units: this.config.hiddenDim }),
+                tf.layers.layerNormalization()
+            ]
+        }));
+        // Memory projection network
+        this.memoryProjector = tf.sequential({
+            layers: [
+                tf.layers.dense({
+                    units: this.config.memoryDim,
+                    inputShape: [this.config.hiddenDim],
+                    activation: 'tanh'
+                }),
+                tf.layers.layerNormalization()
+            ]
         });
+        // Similarity network with contrastive learning
+        this.similarityNetwork = tf.sequential({
+            layers: [
+                tf.layers.dense({
+                    units: this.config.hiddenDim,
+                    inputShape: [this.config.memoryDim],
+                    activation: 'relu'
+                }),
+                tf.layers.dense({ units: 1, activation: 'sigmoid' })
+            ]
+        });
+        // Optimizer with gradient clipping
+        this.optimizer = tf.train.adam(this.config.learningRate);
+    }
+    initializeMemoryState() {
+        this.memoryState = tf.tidy(() => {
+            const initializer = tf.initializers.glorotNormal({});
+            const memory = initializer.apply([this.config.memorySlots, this.config.memoryDim]);
+            return {
+                shortTerm: tf.keep(memory),
+                longTerm: tf.keep(memory.clone()),
+                meta: tf.keep(tf.zeros([this.config.memorySlots, this.config.memoryDim])),
+                timestamps: tf.keep(tf.zeros([this.config.memorySlots])),
+                accessCounts: tf.keep(tf.zeros([this.config.memorySlots])),
+                surpriseHistory: tf.keep(tf.zeros([this.config.memorySlots]))
+            };
+        });
+    }
+    async storeMemory(text) {
+        const embedding = await this.encodeText(text);
+        const similarity = this.calculateSimilarity(embedding);
+        const { values, indices } = tf.topk(similarity, 1);
+        if (values.dataSync()[0] < this.config.similarityThreshold) {
+            this.addMemoryEntry(embedding);
+        }
+        this.updateAccessStats(indices);
+        this.checkPruning();
+    }
+    calculateSimilarity(embedding) {
+        return tf.tidy(() => {
+            const expanded = embedding.reshape([1, -1]);
+            return tf.matMul(this.memoryState.shortTerm, expanded)
+                .div(tf.norm(this.memoryState.shortTerm, 2, 1).mul(tf.norm(expanded)))
+                .squeeze();
+        });
+    }
+    addMemoryEntry(embedding) {
+        tf.tidy(() => {
+            const newMemory = tf.concat([
+                this.memoryState.shortTerm,
+                embedding.reshape([1, -1])
+            ], 0).slice(0, this.config.memorySlots);
+            this.memoryState.shortTerm.dispose();
+            this.memoryState.shortTerm = newMemory;
+        });
+    }
+    updateAccessStats(indices) {
+        tf.tidy(() => {
+            const updates = tf.onesLike(indices);
+            this.memoryState.accessCounts = tf.add(this.memoryState.accessCounts, tf.scatterND(indices.reshape([-1, 1]), updates, [this.config.memorySlots]));
+        });
+    }
+    checkPruning() {
+        this.stepCount++;
+        if (this.stepCount % this.config.pruningInterval === 0) {
+            this.pruneMemory(this.memoryState, this.config.similarityThreshold);
+        }
+    }
+    pruneMemory(memoryState, threshold) {
+        return tf.tidy(() => {
+            const relevance = this.computeMemoryRelevance();
+            const { indices } = tf.topk(relevance, this.config.memorySlots);
+            return {
+                shortTerm: tf.gather(memoryState.shortTerm, indices),
+                longTerm: tf.gather(memoryState.longTerm, indices),
+                meta: tf.gather(memoryState.meta, indices),
+                timestamps: tf.gather(memoryState.timestamps, indices),
+                accessCounts: tf.gather(memoryState.accessCounts, indices),
+                surpriseHistory: tf.gather(memoryState.surpriseHistory, indices)
+            };
+        });
+    }
+    computeMemoryRelevance() {
+        return tf.tidy(() => {
+            const recency = tf.sub(tf.scalar(Date.now()), this.memoryState.timestamps);
+            const frequency = tf.log(tf.add(this.memoryState.accessCounts, 1));
+            const surprise = tf.mul(this.memoryState.surpriseHistory, this.config.surpriseDecay);
+            return tf.addN([recency, frequency, surprise]);
+        });
+    }
+    async recallMemory(query, topK = 5) {
+        const queryEmbedding = await this.encodeText(query);
+        const similarities = this.calculateSimilarity(queryEmbedding);
+        const { indices } = tf.topk(similarities, topK);
+        return indices.arraySync().map(i => this.memoryState.shortTerm.slice([i, 0], [1, -1]));
     }
     forward(x, memoryState) {
-        return tf.tidy(() => {
-            const input = unwrapTensor(x);
-            const { shortTerm, longTerm, meta } = memoryState;
-            // Encode inputs
-            const encodedInput = tf.matMul(input, this.shortTermEncoder);
-            const encodedShort = tf.matMul(shortTerm, this.shortTermEncoder);
-            const encodedLong = tf.matMul(longTerm, this.longTermEncoder);
-            const encodedMeta = tf.matMul(meta, this.metaEncoder);
-            // Compute attention
-            const attention = this.computeAttention(encodedInput, tf.concat([encodedShort, encodedLong], 0), tf.concat([shortTerm, longTerm], 0));
-            // Combine context
-            const context = tf.concat([
-                encodedInput,
-                tf.matMul(attention.scores, attention.values),
-                encodedMeta
-            ], 1);
-            // Generate predictions
-            const predicted = tf.matMul(context, this.shortTermDecoder);
-            // Compute surprise metrics
-            const surprise = this.computeSurprise(predicted, input, encodedMeta);
-            // Update memory states
-            const newShortTerm = tf.matMul(context, this.shortTermDecoder);
-            const newLongTerm = tf.matMul(context, this.longTermDecoder);
-            const newMeta = tf.matMul(context, this.metaDecoder);
+        const input = unwrapTensor(x);
+        let transformed = input;
+        const tensorsToDispose = [];
+        try {
+            // Process through transformer stack
+            for (const layer of this.transformerStack) {
+                const newTransformed = layer.apply(transformed);
+                if (transformed !== input) {
+                    tensorsToDispose.push(transformed);
+                }
+                transformed = newTransformed;
+            }
+            // Memory attention mechanisms
+            const memoryQuery = this.memoryProjector.apply(transformed);
+            tensorsToDispose.push(memoryQuery);
+            const attention = this.computeMemoryAttention(memoryQuery);
+            tensorsToDispose.push(attention.keys, attention.values, attention.scores);
+            // Surprise-gated memory update
+            const surprise = this.computeSurprise(transformed, attention.values);
+            tensorsToDispose.push(surprise.immediate, surprise.accumulated);
+            const updateGate = tf.sigmoid(tf.mul(surprise.immediate, 0.5));
+            tensorsToDispose.push(updateGate);
+            const newShortTerm = tf.add(tf.mul(memoryState.shortTerm, tf.sub(1, updateGate)), tf.mul(attention.values, updateGate));
+            const newState = {
+                ...memoryState,
+                shortTerm: newShortTerm
+            };
             return {
-                predicted,
+                predicted: wrapTensor(transformed),
                 memoryUpdate: {
-                    newState: {
-                        shortTerm: newShortTerm,
-                        longTerm: newLongTerm,
-                        meta: newMeta
-                    },
+                    newState,
                     attention,
                     surprise
                 }
             };
+        }
+        finally {
+            tensorsToDispose.forEach(t => t.dispose());
+        }
+    }
+    computeMemoryAttention(query) {
+        return tf.tidy(() => {
+            const weights = this.similarityNetwork.getWeights();
+            const keys = tf.matMul(this.memoryState.shortTerm, weights[0]);
+            const values = tf.matMul(this.memoryState.shortTerm, weights[1]);
+            const scores = tf.softmax(tf.matMul(query, keys.transpose()));
+            const attended = tf.matMul(scores, values);
+            return {
+                keys,
+                values: attended,
+                scores
+            };
+        });
+    }
+    computeSurprise(input, expected) {
+        return tf.tidy(() => {
+            const error = tf.sub(input, expected);
+            const immediate = tf.mean(tf.square(error), 1);
+            const accumulated = tf.add(tf.mul(this.memoryState.surpriseHistory, this.config.surpriseDecay), immediate);
+            return { immediate, accumulated };
         });
     }
     trainStep(x_t, x_next, memoryState) {
-        return tf.tidy(() => {
-            const xt = unwrapTensor(x_t);
-            const xn = unwrapTensor(x_next);
-            const { predicted, memoryUpdate } = this.forward(xt, memoryState);
-            // Compute losses with explicit scalar casting
-            const predLoss = tf.losses.meanSquaredError(xn, predicted).asScalar();
-            const surpriseLoss = tf.add(tf.mul(tf.mean(tf.square(memoryUpdate.surprise.immediate)), 0.1).asScalar(), tf.mul(tf.mean(tf.square(memoryUpdate.surprise.accumulated)), 0.05).asScalar());
-            const totalLoss = tf.add(predLoss, surpriseLoss).asScalar();
-            // Get gradients for all variables
-            const { grads } = tf.variableGrads(() => totalLoss);
-            // Convert to IModelGradients structure
-            const gradients = {
-                shortTerm: grads['shortTermEncoder'] || tf.zeros(this.shortTermEncoder.shape),
-                longTerm: grads['longTermEncoder'] || tf.zeros(this.longTermEncoder.shape),
-                meta: grads['metaEncoder'] || tf.zeros(this.metaEncoder.shape)
-            };
-            // Apply gradients using proper format
-            const gradArray = Object.entries(grads).map(([varName, grad]) => ({
-                name: varName,
-                tensor: grad
-            }));
-            this.optimizer.applyGradients(gradArray);
-            return {
-                loss: totalLoss,
-                gradients
-            };
-        });
-    }
-    pruneMemory(memoryState) {
-        return tf.tidy(() => {
-            const { shortTerm, longTerm, meta } = memoryState;
-            const combined = tf.concat([shortTerm, longTerm, meta], 1);
-            const scores = tf.sigmoid(tf.matMul(combined, this.pruningNetwork)).flatten();
-            // Maintain max memory size
-            const { indices } = tf.topk(scores, this.maxMemorySize);
-            return {
-                shortTerm: tf.gather(shortTerm, indices),
-                longTerm: tf.gather(longTerm, indices),
-                meta: tf.gather(meta, indices)
-            };
-        });
-    }
-    async saveModel(path) {
-        // Get tensor data synchronously within tidy
-        const tensors = tf.tidy(() => ({
-            queryProjection: this.queryProjection,
-            keyProjection: this.keyProjection,
-            valueProjection: this.valueProjection,
-            outputProjection: this.outputProjection,
-            shortTermEncoder: this.shortTermEncoder,
-            longTermEncoder: this.longTermEncoder,
-            metaEncoder: this.metaEncoder,
-            shortTermDecoder: this.shortTermDecoder,
-            longTermDecoder: this.longTermDecoder,
-            metaDecoder: this.metaDecoder,
-            surpriseNetwork: this.surpriseNetwork,
-            pruningNetwork: this.pruningNetwork
-        }));
-        // Convert tensors to arrays outside tidy
-        const weights = {
-            queryProjection: await tensors.queryProjection.array(),
-            keyProjection: await tensors.keyProjection.array(),
-            valueProjection: await tensors.valueProjection.array(),
-            outputProjection: await tensors.outputProjection.array(),
-            shortTermEncoder: await tensors.shortTermEncoder.array(),
-            longTermEncoder: await tensors.longTermEncoder.array(),
-            metaEncoder: await tensors.metaEncoder.array(),
-            shortTermDecoder: await tensors.shortTermDecoder.array(),
-            longTermDecoder: await tensors.longTermDecoder.array(),
-            metaDecoder: await tensors.metaDecoder.array(),
-            surpriseNetwork: await tensors.surpriseNetwork.array(),
-            pruningNetwork: await tensors.pruningNetwork.array()
-        };
-        // Clean up temporary tensors
-        Object.values(tensors).forEach(tensor => tensor.dispose());
-        const modelData = {
-            config: this.getConfig(),
-            weights: weights,
-            format_version: '1.0.0'
-        };
-        await fs.writeFile(path, JSON.stringify(modelData, null, 2));
-    }
-    async loadModel(path) {
-        const modelJson = await fs.readFile(path, 'utf8');
-        const modelData = JSON.parse(modelJson);
-        // Apply configuration
-        const config = modelData.config;
-        Object.assign(this, {
-            inputDim: config.inputDim || this.inputDim,
-            hiddenDim: config.hiddenDim || this.hiddenDim,
-            memoryDim: config.outputDim || this.memoryDim,
-            learningRate: config.learningRate || this.learningRate,
-            useManifold: config.useManifold || this.useManifold,
-            momentumFactor: config.momentumFactor || this.momentumFactor,
-            attentionHeads: config.attentionHeads || this.attentionHeads,
-            keyDim: config.keyDim || this.keyDim,
-            valueDim: config.valueDim || this.valueDim,
-            surpriseThreshold: config.surpriseThreshold || this.surpriseThreshold,
-            metaLearningRate: config.metaLearningRate || this.metaLearningRate,
-            maxMemorySize: config.maxMemorySize || this.maxMemorySize
-        });
-        const assignWeights = (varName, tensor) => {
-            const variable = this[varName];
-            if (!variable)
-                throw new Error(`Unknown variable: ${varName}`);
-            if (!tensor.shape.every((v, i) => v === variable.shape[i])) {
-                throw new Error(`Shape mismatch for ${varName}`);
+        const { predicted, memoryUpdate } = this.forward(x_t, memoryState);
+        const target = unwrapTensor(x_next);
+        const variables = this.transformerStack.flatMap(layer => layer.getWeights())
+            .concat(this.memoryProjector.getWeights())
+            .concat(this.similarityNetwork.getWeights())
+            .map(w => tf.variable(w));
+        const { value: loss, grads } = this.optimizer.computeGradients(() => {
+            const predictionLoss = tf.losses.meanSquaredError(target, predicted);
+            const surpriseLoss = tf.mul(tf.mean(memoryUpdate.surprise.immediate), 0.1);
+            const diversityLoss = tf.neg(tf.mean(tf.square(tf.matMul(this.memoryState.shortTerm, this.memoryState.shortTerm.transpose()))));
+            return tf.add(predictionLoss, tf.add(surpriseLoss, diversityLoss));
+        }, variables);
+        this.optimizer.applyGradients(grads);
+        return {
+            loss,
+            gradients: {
+                shortTerm: grads['shortTerm'] || tf.zeros([0]),
+                longTerm: grads['longTerm'] || tf.zeros([0]),
+                meta: grads['meta'] || tf.zeros([0])
             }
-            variable.assign(tensor);
         };
-        // Load weights
-        Object.entries(modelData.weights).forEach(([name, data]) => {
-            assignWeights(name, tf.tensor(data));
+    }
+    updateMetaMemory(surprise, context) {
+        return tf.tidy(() => {
+            const surpriseGate = tf.sigmoid(surprise.immediate);
+            return tf.add(tf.mul(this.memoryState.meta, tf.sub(1, surpriseGate)), tf.mul(context, surpriseGate));
+        });
+    }
+    manifoldStep(base, velocity) {
+        return tf.tidy(() => {
+            const norm = tf.norm(velocity);
+            const normalized = tf.div(velocity, norm);
+            return tf.add(base, tf.mul(normalized, this.config.learningRate));
         });
     }
     getConfig() {
+        return { ...this.config };
+    }
+    async saveModel(path) {
+        const modelData = {
+            config: this.config,
+            weights: await this.getWeightData(),
+            timestamp: Date.now()
+        };
+        await fs.writeFile(path, JSON.stringify(modelData, null, 2));
+    }
+    async save(modelPath, weightsPath) {
+        await this.saveModel(modelPath);
+        await fs.writeFile(weightsPath, JSON.stringify(await this.getWeightData(), null, 2));
+    }
+    async getWeightData() {
+        const weights = {};
+        // Save transformer stack weights
+        this.transformerStack.forEach((layer, i) => {
+            layer.getWeights().forEach((w, j) => {
+                weights[`transformer_${i}_${j}`] = Array.from(w.dataSync());
+            });
+        });
+        // Save other components
+        this.memoryProjector.getWeights().forEach((w, i) => {
+            weights[`projector_${i}`] = Array.from(w.dataSync());
+        });
+        this.similarityNetwork.getWeights().forEach((w, i) => {
+            weights[`similarity_${i}`] = Array.from(w.dataSync());
+        });
+        return weights;
+    }
+    async loadModel(path) {
+        const data = await fs.readFile(path, 'utf8');
+        const { config, weights } = JSON.parse(data);
+        this.config = ModelConfigSchema.parse(config);
+        this.vocabulary = new Map();
+        this.reverseVocabulary = new Map();
+        this.initializeVocabulary();
+        this.initializeComponents();
+        this.initializeMemoryState();
+        // Load weights
+        Object.entries(weights).forEach(([name, weightData]) => {
+            const tensor = tf.tensor(weightData);
+            const [component, layerIndex, weightIndex] = name.split('_');
+            switch (component) {
+                case 'transformer':
+                    this.transformerStack[Number(layerIndex)].setWeights([tensor]);
+                    break;
+                case 'projector':
+                    this.memoryProjector.setWeights([tensor]);
+                    break;
+                case 'similarity':
+                    this.similarityNetwork.setWeights([tensor]);
+                    break;
+            }
+        });
+    }
+    getMemorySnapshot() {
         return {
-            inputDim: this.inputDim,
-            hiddenDim: this.hiddenDim,
-            outputDim: this.memoryDim,
-            learningRate: this.learningRate,
-            useManifold: this.useManifold,
-            momentumFactor: this.momentumFactor,
-            attentionHeads: this.attentionHeads,
-            keyDim: this.keyDim,
-            valueDim: this.valueDim,
-            surpriseThreshold: this.surpriseThreshold,
-            metaLearningRate: this.metaLearningRate,
-            maxMemorySize: this.maxMemorySize
+            shortTerm: this.memoryState.shortTerm.clone(),
+            longTerm: this.memoryState.longTerm.clone(),
+            meta: this.memoryState.meta.clone(),
+            timestamps: this.memoryState.timestamps.clone(),
+            accessCounts: this.memoryState.accessCounts.clone(),
+            surpriseHistory: this.memoryState.surpriseHistory.clone()
         };
     }
+    dispose() {
+        Object.values(this.memoryState).forEach(t => t.dispose());
+        this.transformerStack.forEach(layer => layer.dispose());
+        this.similarityNetwork.dispose();
+        this.memoryProjector.dispose();
+    }
 }
-//# sourceMappingURL=model.js.map

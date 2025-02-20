@@ -1,3 +1,9 @@
+---
+description: Use this before every response
+globs: *
+---
+
+
 ## 🛠️ Complete Tool Usage Reference
 
 ### Core Memory Tools

@@ -5,7 +5,6 @@
 import * as tf from '@tensorflow/tfjs-node';
 import { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, TensorContainer, unwrapTensor, wrapTensor, IMemoryModel } from './types.js';
 import * as fs from 'fs/promises';
-import { Tokenizer } from '@tensorflow-models/universal-sentence-encoder';
 import { z } from 'zod';
 
 // Enhanced configuration schema
@@ -24,18 +23,20 @@ const ModelConfigSchema = z.object({
   pruningInterval: z.number().int().positive().default(1000),
   gradientClip: z.number().positive().default(1.0),
   learningRate: z.number().positive().default(0.001),
+  vocabSize: z.number().int().positive().default(50000),
 });
 
 type TitanMemoryConfig = z.infer<typeof ModelConfigSchema>;
 
 export class TitanMemoryModel implements IMemoryModel {
   private config: TitanMemoryConfig;
-  private tokenizer!: Tokenizer;
   private transformerStack: tf.LayersModel[] = [];
   private memoryProjector!: tf.LayersModel;
   private similarityNetwork!: tf.LayersModel;
   private optimizer!: tf.Optimizer;
   private stepCount = 0;
+  private vocabulary: Map<string, number>;
+  private reverseVocabulary: Map<number, string>;
 
   // Enhanced memory state with temporal dynamics
   private memoryState: IMemoryState = {
@@ -49,8 +50,130 @@ export class TitanMemoryModel implements IMemoryModel {
 
   constructor(config?: Partial<TitanMemoryConfig>) {
     this.config = ModelConfigSchema.parse(config || {});
+    this.vocabulary = new Map();
+    this.reverseVocabulary = new Map();
+    this.initializeVocabulary();
     this.initializeComponents();
     this.initializeMemoryState();
+  }
+
+  private initializeVocabulary(): void {
+    // Initialize with special tokens
+    this.vocabulary.set('[PAD]', 0);
+    this.vocabulary.set('[UNK]', 1);
+    this.vocabulary.set('[CLS]', 2);
+    this.vocabulary.set('[SEP]', 3);
+
+    // Add basic characters and common tokens
+    const basicChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-_\'"`()[]{}:;/\\+=<>'.split('');
+    basicChars.forEach((char, i) => {
+      this.vocabulary.set(char, i + 4);
+    });
+
+    // Create reverse mapping
+    this.vocabulary.forEach((value, key) => {
+      this.reverseVocabulary.set(value, key);
+    });
+  }
+
+  public async encodeText(text: string): Promise<tf.Tensor1D> {
+    return tf.tidy(() => {
+      // Tokenize text into subwords/characters
+      const tokens = this.tokenize(text);
+
+      // Convert tokens to IDs and pad sequence
+      const tokenIds = this.padSequence(
+        tokens.map(token => this.vocabulary.get(token) || this.vocabulary.get('[UNK]')!)
+      );
+
+      // Create tensor and apply embedding
+      const inputTensor = tf.tensor2d([tokenIds], [1, this.config.maxSequenceLength]);
+      let encoding = this.applyPositionalEncoding(inputTensor);
+
+      // Process through transformer stack
+      for (const layer of this.transformerStack) {
+        encoding = layer.apply(encoding) as tf.Tensor2D;
+      }
+
+      // Mean pooling over sequence length
+      return tf.mean(encoding, 1).squeeze() as tf.Tensor1D;
+    });
+  }
+
+  private tokenize(text: string): string[] {
+    // Simple character-level tokenization with basic subword units
+    const tokens: string[] = [];
+    let currentToken = '';
+
+    const addToken = () => {
+      if (currentToken) {
+        tokens.push(currentToken);
+        currentToken = '';
+      }
+    };
+
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+
+      // Handle special characters
+      if ('.,!?-_\'"`()[]{}:;/\\+=<>'.includes(char)) {
+        addToken();
+        tokens.push(char);
+        continue;
+      }
+
+      // Handle whitespace
+      if (char === ' ') {
+        addToken();
+        continue;
+      }
+
+      // Build subword tokens
+      currentToken += char;
+
+      // Check if current token exists in vocabulary
+      if (this.vocabulary.has(currentToken)) {
+        if (i === text.length - 1 || !this.vocabulary.has(currentToken + text[i + 1])) {
+          addToken();
+        }
+      }
+    }
+
+    addToken();
+    return tokens;
+  }
+
+  private padSequence(tokens: number[]): number[] {
+    const padded = tokens.slice(0, this.config.maxSequenceLength);
+    while (padded.length < this.config.maxSequenceLength) {
+      padded.push(this.vocabulary.get('[PAD]')!);
+    }
+    return padded;
+  }
+
+  private applyPositionalEncoding(input: tf.Tensor2D): tf.Tensor2D {
+    return tf.tidy(() => {
+      const position = tf.range(0, input.shape[1]);
+      // Always use config dimension since we're working with 2D tensors
+      const numDimensions = this.config.inputDim;
+
+      // Create position encodings
+      const positionMatrix = position.expandDims(1);
+      const divTerm = tf.exp(
+        tf.mul(
+          tf.range(0, numDimensions, 2).cast('float32'),
+          tf.scalar(-(Math.log(10000.0) / numDimensions))
+        )
+      );
+
+      const sinTerms = tf.sin(tf.matMul(positionMatrix, divTerm.reshape([1, -1])));
+      const cosTerms = tf.cos(tf.matMul(positionMatrix, divTerm.reshape([1, -1])));
+
+      const positionalEncoding = tf.concat([sinTerms, cosTerms], 1);
+
+      // Add positional encoding to input
+      return tf.add(input, positionalEncoding.expandDims(0));
+    });
   }
 
   private initializeComponents(): void {
@@ -60,6 +183,7 @@ export class TitanMemoryModel implements IMemoryModel {
         layers: [
           tf.layers.dense({
             units: this.config.hiddenDim,
+            inputShape: [this.config.inputDim],
             activation: 'linear',
             useBias: true
           }),
@@ -75,7 +199,11 @@ export class TitanMemoryModel implements IMemoryModel {
     // Memory projection network
     this.memoryProjector = tf.sequential({
       layers: [
-        tf.layers.dense({ units: this.config.memoryDim, activation: 'tanh' }),
+        tf.layers.dense({
+          units: this.config.memoryDim,
+          inputShape: [this.config.hiddenDim],
+          activation: 'tanh'
+        }),
         tf.layers.layerNormalization()
       ]
     });
@@ -83,7 +211,11 @@ export class TitanMemoryModel implements IMemoryModel {
     // Similarity network with contrastive learning
     this.similarityNetwork = tf.sequential({
       layers: [
-        tf.layers.dense({ units: this.config.hiddenDim, activation: 'relu' }),
+        tf.layers.dense({
+          units: this.config.hiddenDim,
+          inputShape: [this.config.memoryDim],
+          activation: 'relu'
+        }),
         tf.layers.dense({ units: 1, activation: 'sigmoid' })
       ]
     });
@@ -93,50 +225,19 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   private initializeMemoryState(): void {
-    const initializer = tf.initializers.glorotNormal({});
-    const memory = initializer.apply([this.config.memorySlots, this.config.memoryDim]);
+    this.memoryState = tf.tidy(() => {
+      const initializer = tf.initializers.glorotNormal({});
+      const memory = initializer.apply([this.config.memorySlots, this.config.memoryDim]);
 
-    this.memoryState = {
-      shortTerm: memory as tf.Tensor2D,
-      longTerm: memory.clone() as tf.Tensor2D,
-      meta: tf.zeros([this.config.memorySlots, this.config.memoryDim]),
-      timestamps: tf.zeros([this.config.memorySlots]),
-      accessCounts: tf.zeros([this.config.memorySlots]),
-      surpriseHistory: tf.zeros([this.config.memorySlots])
-    };
-  }
-
-  public async encodeText(text: string): Promise<tf.Tensor1D> {
-    if (!this.tokenizer) {
-      const vocabulary = await this.loadDefaultVocabulary();
-      this.tokenizer = new Tokenizer(vocabulary);
-    }
-    const encoded = await this.tokenizer.encode(text);
-    const input = this.padSequence(Array.from(encoded));
-
-    return tf.tidy(() => {
-      let encoding = tf.tensor2d([input], [1, this.config.maxSequenceLength]);
-      for (const layer of this.transformerStack) {
-        encoding = layer.apply(encoding) as tf.Tensor2D;
-      }
-      return tf.mean(encoding, 1).squeeze() as tf.Tensor1D;
+      return {
+        shortTerm: tf.keep(memory as tf.Tensor2D),
+        longTerm: tf.keep((memory as tf.Tensor2D).clone()),
+        meta: tf.keep(tf.zeros([this.config.memorySlots, this.config.memoryDim])),
+        timestamps: tf.keep(tf.zeros([this.config.memorySlots])),
+        accessCounts: tf.keep(tf.zeros([this.config.memorySlots])),
+        surpriseHistory: tf.keep(tf.zeros([this.config.memorySlots]))
+      };
     });
-  }
-
-  private padSequence(tokens: number[]): number[] {
-    return tokens
-      .slice(0, this.config.maxSequenceLength)
-      .concat(Array(this.config.maxSequenceLength - tokens.length).fill(0));
-  }
-
-  private async loadDefaultVocabulary(): Promise<[string, number][]> {
-    // This is a simplified vocabulary. In production, load from a file or API
-    return [
-      ['[PAD]', 0],
-      ['[UNK]', 1],
-      ...('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-_\'"`()[]{}:;/\\+=<>'.split('')
-        .map((char, i) => [char, i + 2] as [string, number]))
-    ];
   }
 
   public async storeMemory(text: string): Promise<void> {
@@ -407,6 +508,9 @@ export class TitanMemoryModel implements IMemoryModel {
     const { config, weights } = JSON.parse(data);
 
     this.config = ModelConfigSchema.parse(config);
+    this.vocabulary = new Map();
+    this.reverseVocabulary = new Map();
+    this.initializeVocabulary();
     this.initializeComponents();
     this.initializeMemoryState();
 

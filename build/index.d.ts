@@ -4,21 +4,20 @@ export declare class TitanMemoryServer {
     private model;
     private server;
     private memoryState;
-    private app;
-    private port;
     private memoryPath;
     private modelPath;
     private weightsPath;
     private autoSaveInterval;
+    private isInitialized;
     constructor(config?: {
-        port?: number;
         memoryPath?: string;
         modelPath?: string;
         weightsPath?: string;
     });
+    private ensureInitialized;
     private registerTools;
-    run(): Promise<void>;
     private autoInitialize;
     private loadSavedState;
     private saveMemoryState;
+    run(): Promise<void>;
 }

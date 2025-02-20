@@ -2,7 +2,12 @@ import { Transport, CallToolRequest, CallToolResult } from './types.js';
 import WebSocket from 'ws';
 import * as readline from 'readline';
 import { z } from 'zod';
-import { CallToolRequestSchema } from './server.js';
+
+// Define request schema here since it's transport-specific
+const CallToolRequestSchema = z.object({
+  name: z.string(),
+  parameters: z.record(z.any())
+});
 
 export class WebSocketTransport implements Transport {
   private ws: WebSocket;
@@ -89,5 +94,5 @@ export class StdioTransport implements Transport {
   onRequest(handler: (request: CallToolRequest) => Promise<CallToolResult>): void {
     this.requestHandler = handler;
   }
-  
+
 } 
