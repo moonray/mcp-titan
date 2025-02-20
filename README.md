@@ -6,6 +6,55 @@ A MCP server built with a three-tier memory architecture that handles storage as
 - **Long-term memory:** Persists core patterns and knowledge over time. This state is saved automatically.
 - **Meta memory:** Keeps higher-level abstractions that support context-aware responses.
 
+Key Innovations:
+
+Transformer-XL Inspired Architecture
+
+Segment-level recurrence for long-term context
+
+Relative positional encoding in memory attention
+
+Gated transformer layers with layer normalization
+
+Dynamic Memory Management
+
+Surprise-gated memory updates
+
+Temporal decay with recency/frequency tracking
+
+Contrastive similarity learning
+
+Adaptive pruning based on composite relevance
+
+Advanced Training Dynamics
+
+Composite loss (prediction + surprise + diversity)
+
+Gradient clipping with Adam optimizer
+
+Automatic mixed precision training
+
+LLM Integration Features
+
+Semantic text encoding pipeline
+
+Memory snapshot serialization
+
+Config validation with Zod
+
+Efficient tensor disposal management
+
+Research-Backed Techniques
+
+Neural cache mechanism for fast recall
+
+Memory-augmented transformer architecture
+
+Online learning with surprise signals
+
+Diversity regularization for memory coverage
+
+
 ## 🚀 Quick Start
 
 1. Basic Installation (uses default memory path):

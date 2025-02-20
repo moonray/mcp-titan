@@ -30,6 +30,7 @@ export class TitanMemoryServer {
   private modelPath: string;
   private weightsPath: string;
   private autoSaveInterval: NodeJS.Timeout | null = null;
+  private isInitialized: boolean = false;
 
   constructor(config: { port?: number; memoryPath?: string; modelPath?: string; weightsPath?: string } = {}) {
     this.port = config.port || 0;
@@ -52,6 +53,13 @@ export class TitanMemoryServer {
     this.registerTools();
   }
 
+  private async ensureInitialized() {
+    if (!this.isInitialized) {
+      await this.autoInitialize();
+      this.isInitialized = true;
+    }
+  }
+
   private registerTools() {
     // Register the init_model tool
     this.server.tool(
@@ -69,6 +77,7 @@ export class TitanMemoryServer {
           meta: wrapTensor(zeros.clone())
         };
         zeros.dispose();
+        this.isInitialized = true;
 
         return {
           content: [{
@@ -87,9 +96,7 @@ export class TitanMemoryServer {
         x_next: z.array(z.number())
       },
       async ({ x_t, x_next }) => {
-        if (!this.model || !this.memoryState) {
-          throw new Error('Model not initialized');
-        }
+        await this.ensureInitialized();
 
         const x_tT = wrapTensor(tf.tensor1d(x_t));
         const x_nextT = wrapTensor(tf.tensor1d(x_next));
@@ -122,9 +129,7 @@ export class TitanMemoryServer {
         x: z.array(z.number())
       },
       async ({ x }) => {
-        if (!this.model || !this.memoryState) {
-          throw new Error('Model not initialized');
-        }
+        await this.ensureInitialized();
 
         const xT = wrapTensor(tf.tensor1d(x));
         const { predicted, memoryUpdate } = this.model.forward(xT, this.memoryState);
@@ -152,30 +157,32 @@ export class TitanMemoryServer {
     // Register get_memory_state tool
     this.server.tool(
       'get_memory_state',
-      {},
-      async () => {
-        if (!this.model || !this.memoryState) {
-          throw new Error('Model not initialized');
-        }
+      {
+        type: z.object({}).optional()
+      },
+      async (_args, _extra) => {
+        await this.ensureInitialized();
 
-        const shortTermTensor = unwrapTensor(this.memoryState.shortTerm);
-        const stats = {
-          mean: tf.mean(shortTermTensor).dataSync()[0],
-          std: tf.sqrt(tf.moments(shortTermTensor).variance).dataSync()[0]
-        };
+        return tf.tidy(() => {
+          const shortTermTensor = unwrapTensor(this.memoryState.shortTerm);
+          const stats = {
+            mean: tf.mean(shortTermTensor).dataSync()[0],
+            std: tf.sqrt(tf.moments(shortTermTensor).variance).dataSync()[0]
+          };
 
-        const result = {
-          memoryStats: stats,
-          memorySize: this.memoryState.shortTerm.shape[0],
-          status: 'active'
-        };
+          const result = {
+            memoryStats: stats,
+            memorySize: this.memoryState.shortTerm.shape[0],
+            status: 'active'
+          };
 
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(result)
-          }]
-        };
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify(result)
+            }]
+          };
+        });
       }
     );
   }
