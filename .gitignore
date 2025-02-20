@@ -7,3 +7,4 @@ package-lock.json
 .titan_memory/weights.bin
 test-weights.json
 memory.json
+package-lock.json
