@@ -276,25 +276,89 @@ export class TitanMemoryServer {
     );
   }
 
+  private async processInput(input: string | number[] | tf.Tensor | number): Promise<tf.Tensor> {
+    return tf.tidy(() => {
+      if (typeof input === 'string') {
+        // Convert string to vector of proper size
+        const encoder = new TextEncoder();
+        const bytes = encoder.encode(input);
+        const paddedBytes = new Uint8Array(768); // Initialize with zeros
+        paddedBytes.set(bytes.slice(0, 768)); // Take first 768 bytes or pad with zeros
+        return tf.tensor1d(Array.from(paddedBytes)).div(255); // Normalize to [0,1]
+      } else if (Array.isArray(input)) {
+        // Pad or truncate array to match expected size
+        const paddedArray = new Array(768).fill(0);
+        paddedArray.splice(0, Math.min(input.length, 768), ...input.slice(0, 768));
+        return tf.tensor1d(paddedArray);
+      } else if (input instanceof tf.Tensor) {
+        // Ensure tensor is flattened and reshaped to 768 dimensions
+        const flattenedData = tf.tidy(() => {
+          const flattened = input.flatten();
+          const inputData = flattened.dataSync();
+          const paddedData = new Float32Array(768).fill(0);
+          paddedData.set(Array.from(inputData).slice(0, 768));
+          return tf.tensor1d(paddedData);
+        });
+        return flattenedData;
+      } else if (typeof input === 'number') {
+        // Create a tensor of proper size filled with the number
+        return tf.ones([768]).mul(tf.scalar(input));
+      }
+      throw new Error('Invalid input type');
+    });
+  }
+
   private async autoInitialize(): Promise<void> {
     try {
       await fs.mkdir(this.memoryPath, { recursive: true });
 
-      if (!(await this.loadSavedState())) {
-        this.model = new TitanMemoryModel();
-        this.memoryState = this.wrapWithMemoryManagement(() => {
-          const zeros = tf.zeros([768]);
-          const slots = this.model.getConfig().memorySlots;
-          return {
-            shortTerm: wrapTensor(zeros),
-            longTerm: wrapTensor(zeros.clone()),
-            meta: wrapTensor(zeros.clone()),
-            timestamps: wrapTensor(tf.zeros([slots])),
-            accessCounts: wrapTensor(tf.zeros([slots])),
-            surpriseHistory: wrapTensor(tf.zeros([slots]))
-          };
-        });
-        await this.saveMemoryState();
+      // Initialize model first
+      this.model = new TitanMemoryModel({
+        inputDim: 768,
+        memorySlots: 5000,
+        transformerLayers: 6
+      });
+
+      // Initialize memory state with proper dimensions
+      this.memoryState = tf.tidy(() => {
+        const zeros = tf.zeros([768]);
+        const slots = this.model.getConfig().memorySlots;
+        return {
+          shortTerm: wrapTensor(zeros.clone()),
+          longTerm: wrapTensor(zeros.clone()),
+          meta: wrapTensor(zeros.clone()),
+          timestamps: wrapTensor(tf.zeros([slots])),
+          accessCounts: wrapTensor(tf.zeros([slots])),
+          surpriseHistory: wrapTensor(tf.zeros([slots]))
+        };
+      });
+
+      // Try to load saved state if exists
+      const [modelExists, weightsExist] = await Promise.all([
+        fs.access(this.modelPath).then(() => true).catch(() => false),
+        fs.access(this.weightsPath).then(() => true).catch(() => false)
+      ]);
+
+      if (modelExists && weightsExist) {
+        try {
+          await this.model.loadModel(this.modelPath);
+          const memoryStateJson = await fs.readFile(
+            path.join(this.memoryPath, 'memory_state.json'),
+            'utf8'
+          );
+          const memoryState = JSON.parse(memoryStateJson) as SerializedMemoryState;
+
+          this.memoryState = tf.tidy(() => ({
+            shortTerm: wrapTensor(tf.tensor1d(memoryState.shortTerm)),
+            longTerm: wrapTensor(tf.tensor1d(memoryState.longTerm)),
+            meta: wrapTensor(tf.tensor1d(memoryState.meta)),
+            timestamps: wrapTensor(tf.tensor1d(memoryState.timestamps)),
+            accessCounts: wrapTensor(tf.tensor1d(memoryState.accessCounts)),
+            surpriseHistory: wrapTensor(tf.tensor1d(memoryState.surpriseHistory))
+          }));
+        } catch (loadError) {
+          console.warn('Failed to load saved state, using initialized state:', loadError);
+        }
       }
 
       if (!this.autoSaveInterval) {
@@ -302,6 +366,8 @@ export class TitanMemoryServer {
           await this.saveMemoryState().catch(console.error);
         }, 300000);
       }
+
+      this.isInitialized = true;
     } catch (error: unknown) {
       console.error('Initialization failed:', error instanceof Error ? error.message : error);
       throw error;

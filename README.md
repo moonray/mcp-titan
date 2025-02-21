@@ -1,4 +1,7 @@
 # Titan Memory MCP Server
+
+[![smithery badge](https://smithery.ai/badge/@henryhawke/mcp-titan)](https://smithery.ai/server/@henryhawke/mcp-titan)
+
 I accidentally deleted my two most recent commits messing around with git commands I have no business pretending to know. This is the last version of the server before I deleted the commits. Right now I'm trying to figure out how to get the Cursor to recognize the tools in index.ts.
 Also When you do a forward pass, you get '(0 , util_1.isNullOrUndefined) is not a function' error. Thats no good. I solved that already but can't remember what I did.
 

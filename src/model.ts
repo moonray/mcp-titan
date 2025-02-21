@@ -531,65 +531,55 @@ export class TitanMemoryModel implements IMemoryModel {
         try {
           const tensor = tf.tensor(weightData as number[]);
 
+          const handleWeightLoading = (component: any, weights: tf.Tensor[]) => {
+            if (!component || !weights || weightIndex >= weights.length) {
+              tensor.dispose();
+              return;
+            }
+
+            const currentWeight = weights[weightIndex];
+            if (!currentWeight) {
+              tensor.dispose();
+              return;
+            }
+
+            const expectedShape = currentWeight.shape;
+            const reshapedTensor = tf.tidy(() => {
+              // Ensure we have the right number of elements
+              const totalElements = expectedShape.reduce((a, b) => a * b, 1);
+              const flatData = tensor.reshape([-1]).dataSync();
+              const paddedData = new Float32Array(totalElements).fill(0);
+              paddedData.set(Array.from(flatData).slice(0, totalElements));
+              return tf.tensor(Array.from(paddedData), expectedShape);
+            });
+
+            weights[weightIndex].dispose();
+            weights[weightIndex] = reshapedTensor;
+            component.setWeights(weights);
+            tensor.dispose();
+          };
+
           switch (componentName) {
-            case 'transformer': {
+            case 'transformer':
               if (this.transformerStack[layerIndex]) {
-                const layer = this.transformerStack[layerIndex];
-                const currentWeights = layer.getWeights();
-                if (currentWeights && currentWeights[weightIndex]) {
-                  const expectedShape = currentWeights[weightIndex].shape;
-
-                  // Reshape tensor to match expected shape
-                  const reshapedTensor = tf.tidy(() => {
-                    const flattened = tensor.reshape([-1]);
-                    return flattened.reshape(expectedShape);
-                  });
-
-                  currentWeights[weightIndex] = reshapedTensor;
-                  layer.setWeights(currentWeights);
-                }
-                tensor.dispose();
+                handleWeightLoading(
+                  this.transformerStack[layerIndex],
+                  this.transformerStack[layerIndex].getWeights()
+                );
               }
               break;
-            }
-            case 'projector': {
-              if (this.memoryProjector) {
-                const currentWeights = this.memoryProjector.getWeights();
-                if (currentWeights && currentWeights[weightIndex]) {
-                  const expectedShape = currentWeights[weightIndex].shape;
-
-                  // Reshape tensor to match expected shape
-                  const reshapedTensor = tf.tidy(() => {
-                    const flattened = tensor.reshape([-1]);
-                    return flattened.reshape(expectedShape);
-                  });
-
-                  currentWeights[weightIndex] = reshapedTensor;
-                  this.memoryProjector.setWeights(currentWeights);
-                }
-                tensor.dispose();
-              }
+            case 'projector':
+              handleWeightLoading(
+                this.memoryProjector,
+                this.memoryProjector?.getWeights()
+              );
               break;
-            }
-            case 'similarity': {
-              if (this.similarityNetwork) {
-                const currentWeights = this.similarityNetwork.getWeights();
-                if (currentWeights && currentWeights[weightIndex]) {
-                  const expectedShape = currentWeights[weightIndex].shape;
-
-                  // Reshape tensor to match expected shape
-                  const reshapedTensor = tf.tidy(() => {
-                    const flattened = tensor.reshape([-1]);
-                    return flattened.reshape(expectedShape);
-                  });
-
-                  currentWeights[weightIndex] = reshapedTensor;
-                  this.similarityNetwork.setWeights(currentWeights);
-                }
-                tensor.dispose();
-              }
+            case 'similarity':
+              handleWeightLoading(
+                this.similarityNetwork,
+                this.similarityNetwork?.getWeights()
+              );
               break;
-            }
             default:
               tensor.dispose();
           }
