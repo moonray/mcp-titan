@@ -1,9 +1,6 @@
 # Titan Memory MCP Server
 
 
-<a href="https://glama.ai/mcp/servers/oleughyw2v">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/oleughyw2v/badge" />
-</a>
 
 A MCP server built with a three-tier memory architecture that handles storage as follows:
 
