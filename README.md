@@ -1,4 +1,6 @@
 # Titan Memory MCP Server
+I accidentally deleted my two most recent commits messing around with git commands I have no business pretending to know. This is the last version of the server before I deleted the commits. Right now I'm trying to figure out how to get the Cursor to recognize the tools in index.ts.
+Also When you do a forward pass, you get '(0 , util_1.isNullOrUndefined) is not a function' error. Thats no good. I solved that already but can't remember what I did.
 
 A MCP server built with a three-tier memory architecture that handles storage as follows:
 
@@ -6,54 +8,9 @@ A MCP server built with a three-tier memory architecture that handles storage as
 - **Long-term memory:** Persists core patterns and knowledge over time. This state is saved automatically.
 - **Meta memory:** Keeps higher-level abstractions that support context-aware responses.
 
-Key Innovations:
+## 📦 Installation
 
-Transformer-XL Inspired Architecture
-
-Segment-level recurrence for long-term context
-
-Relative positional encoding in memory attention
-
-Gated transformer layers with layer normalization
-
-Dynamic Memory Management
-
-Surprise-gated memory updates
-
-Temporal decay with recency/frequency tracking
-
-Contrastive similarity learning
-
-Adaptive pruning based on composite relevance
-
-Advanced Training Dynamics
-
-Composite loss (prediction + surprise + diversity)
-
-Gradient clipping with Adam optimizer
-
-Automatic mixed precision training
-
-LLM Integration Features
-
-Semantic text encoding pipeline
-
-Memory snapshot serialization
-
-Config validation with Zod
-
-Efficient tensor disposal management
-
-Research-Backed Techniques
-
-Neural cache mechanism for fast recall
-
-Memory-augmented transformer architecture
-
-Online learning with surprise signals
-
-Diversity regularization for memory coverage
-
+CHECK OUT docs/guides/how-to.md for more information on how to install and run the server.
 
 ## 🚀 Quick Start
 
@@ -104,13 +61,13 @@ The following files will be created in the memory directory:
 - `weights/`: Model weights directory
 
 ## Example usage
+
 Usage Example:
 
-
-``` typescript
+```typescript
 const model = new TitanMemoryModel({
   memorySlots: 10000,
-  transformerLayers: 8
+  transformerLayers: 8,
 });
 
 // Store semantic memory
@@ -118,11 +75,11 @@ await model.storeMemory("User prefers dark mode and large text");
 
 // Recall relevant memories
 const results = await model.recallMemory("interface preferences", 3);
-results.forEach(memory => console.log(memory.arraySync()));
+results.forEach((memory) => console.log(memory.arraySync()));
 
 // Continuous learning
 model.trainStep(
-  wrapTensor(currentInput), 
+  wrapTensor(currentInput),
   wrapTensor(targetOutput),
   model.getMemoryState()
 );

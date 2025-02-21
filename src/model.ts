@@ -7,6 +7,11 @@ import { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdate
 import * as fs from 'fs/promises';
 import { z } from 'zod';
 
+// Helper function to check if a value is null or undefined
+function isNullOrUndefined(value: unknown): value is null | undefined {
+  return value === null || value === undefined;
+}
+
 // Enhanced configuration schema
 const ModelConfigSchema = z.object({
   inputDim: z.number().int().positive().default(768),
@@ -504,33 +509,98 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   public async loadModel(path: string): Promise<void> {
-    const data = await fs.readFile(path, 'utf8');
-    const { config, weights } = JSON.parse(data);
+    try {
+      const data = await fs.readFile(path, 'utf8');
+      const { config, weights } = JSON.parse(data);
 
-    this.config = ModelConfigSchema.parse(config);
-    this.vocabulary = new Map();
-    this.reverseVocabulary = new Map();
-    this.initializeVocabulary();
-    this.initializeComponents();
-    this.initializeMemoryState();
+      // Update config
+      this.config = ModelConfigSchema.parse(config);
 
-    // Load weights
-    Object.entries(weights).forEach(([name, weightData]) => {
-      const tensor = tf.tensor(weightData as number[]);
-      const [component, layerIndex, weightIndex] = name.split('_');
+      // Initialize components with new config
+      this.initializeComponents();
 
-      switch (component) {
-        case 'transformer':
-          this.transformerStack[Number(layerIndex)].setWeights([tensor]);
-          break;
-        case 'projector':
-          this.memoryProjector.setWeights([tensor]);
-          break;
-        case 'similarity':
-          this.similarityNetwork.setWeights([tensor]);
-          break;
-      }
-    });
+      // Initialize memory state
+      this.initializeMemoryState();
+
+      // Load weights for each component
+      Object.entries(weights).forEach(([name, weightData]) => {
+        const [componentName, layerIndexStr, weightIndexStr] = name.split('_');
+        const layerIndex = parseInt(layerIndexStr, 10);
+        const weightIndex = parseInt(weightIndexStr, 10);
+
+        try {
+          const tensor = tf.tensor(weightData as number[]);
+
+          switch (componentName) {
+            case 'transformer': {
+              if (this.transformerStack[layerIndex]) {
+                const layer = this.transformerStack[layerIndex];
+                const currentWeights = layer.getWeights();
+                if (currentWeights && currentWeights[weightIndex]) {
+                  const expectedShape = currentWeights[weightIndex].shape;
+
+                  // Reshape tensor to match expected shape
+                  const reshapedTensor = tf.tidy(() => {
+                    const flattened = tensor.reshape([-1]);
+                    return flattened.reshape(expectedShape);
+                  });
+
+                  currentWeights[weightIndex] = reshapedTensor;
+                  layer.setWeights(currentWeights);
+                }
+                tensor.dispose();
+              }
+              break;
+            }
+            case 'projector': {
+              if (this.memoryProjector) {
+                const currentWeights = this.memoryProjector.getWeights();
+                if (currentWeights && currentWeights[weightIndex]) {
+                  const expectedShape = currentWeights[weightIndex].shape;
+
+                  // Reshape tensor to match expected shape
+                  const reshapedTensor = tf.tidy(() => {
+                    const flattened = tensor.reshape([-1]);
+                    return flattened.reshape(expectedShape);
+                  });
+
+                  currentWeights[weightIndex] = reshapedTensor;
+                  this.memoryProjector.setWeights(currentWeights);
+                }
+                tensor.dispose();
+              }
+              break;
+            }
+            case 'similarity': {
+              if (this.similarityNetwork) {
+                const currentWeights = this.similarityNetwork.getWeights();
+                if (currentWeights && currentWeights[weightIndex]) {
+                  const expectedShape = currentWeights[weightIndex].shape;
+
+                  // Reshape tensor to match expected shape
+                  const reshapedTensor = tf.tidy(() => {
+                    const flattened = tensor.reshape([-1]);
+                    return flattened.reshape(expectedShape);
+                  });
+
+                  currentWeights[weightIndex] = reshapedTensor;
+                  this.similarityNetwork.setWeights(currentWeights);
+                }
+                tensor.dispose();
+              }
+              break;
+            }
+            default:
+              tensor.dispose();
+          }
+        } catch (error) {
+          console.error(`Error loading weights for ${name}:`, error);
+        }
+      });
+    } catch (error) {
+      console.error('Error loading model:', error);
+      throw error;
+    }
   }
 
   public getMemorySnapshot(): Record<string, tf.Tensor> {

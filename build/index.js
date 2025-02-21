@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { z } from "zod";
 import * as tf from '@tensorflow/tfjs-node';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -8,6 +9,30 @@ import { VectorProcessor } from './utils.js';
 import * as path from 'path';
 import { promises as fs } from 'fs';
 import * as crypto from 'crypto';
+// Define parameter schemas first
+const HelpParams = z.object({
+    tool: z.string().optional(),
+    category: z.string().optional(),
+    showExamples: z.boolean().optional(),
+    verbose: z.boolean().optional(),
+    interactive: z.boolean().optional(),
+    context: z.record(z.any()).optional()
+});
+const InitModelParams = z.object({
+    inputDim: z.number().int().positive().optional(),
+    memorySlots: z.number().int().positive().optional(),
+    transformerLayers: z.number().int().positive().optional()
+});
+const ForwardPassParams = z.object({
+    x: z.union([z.string(), z.number(), z.array(z.number()), z.custom()])
+});
+const TrainStepParams = z.object({
+    x_t: z.union([z.string(), z.array(z.number())]),
+    x_next: z.union([z.string(), z.array(z.number())])
+});
+const GetMemoryStateParams = z.object({
+    type: z.string().optional()
+});
 export class TitanMemoryServer {
     server;
     model;
@@ -18,16 +43,63 @@ export class TitanMemoryServer {
     memoryPath;
     modelPath;
     weightsPath;
+    testMode;
     constructor(options = {}) {
         this.server = new McpServer({
             name: "Titan Memory",
-            version: "1.2.0"
+            version: "1.2.0",
+            description: "A memory-augmented model server for Cursor",
+            capabilities: {
+                tools: {
+                    help: {
+                        description: "Get help about available tools",
+                        parameters: HelpParams
+                    },
+                    init_model: {
+                        description: "Initialize or reset the model",
+                        parameters: InitModelParams
+                    },
+                    train_step: {
+                        description: "Perform a training step",
+                        parameters: TrainStepParams
+                    },
+                    forward_pass: {
+                        description: "Perform a forward pass through the model",
+                        parameters: ForwardPassParams
+                    },
+                    get_memory_state: {
+                        description: "Get the current memory state",
+                        parameters: GetMemoryStateParams
+                    }
+                }
+            }
         });
         this.vectorProcessor = VectorProcessor.getInstance();
         this.memoryPath = options.memoryPath || path.join(process.cwd(), '.titan_memory');
         this.modelPath = path.join(this.memoryPath, 'model.json');
         this.weightsPath = path.join(this.memoryPath, 'weights.bin');
+        this.testMode = options.testMode || false;
         this.memoryState = this.initializeEmptyState();
+        if (this.testMode) {
+            // Initialize model with default configuration in test mode
+            this.model = new TitanMemoryModel({
+                inputDim: 768,
+                hiddenDim: 512,
+                memoryDim: 1024,
+                transformerLayers: 6,
+                numHeads: 8,
+                ffDimension: 2048,
+                dropoutRate: 0.1,
+                maxSequenceLength: 512,
+                memorySlots: 5000,
+                similarityThreshold: 0.65,
+                surpriseDecay: 0.9,
+                pruningInterval: 1000,
+                gradientClip: 1.0,
+                learningRate: 0.001,
+                vocabSize: 50000
+            });
+        }
         this.registerTools();
     }
     initializeEmptyState() {
@@ -81,16 +153,16 @@ export class TitanMemoryServer {
         this.server.tool('help', {
             tool: z.string().optional(),
             category: z.string().optional(),
-            showExamples: z.boolean().optional().default(false),
-            verbose: z.boolean().optional().default(false),
-            interactive: z.boolean().optional().default(false),
-            context: z.record(z.any()).optional().default({})
+            showExamples: z.boolean().optional(),
+            verbose: z.boolean().optional(),
+            interactive: z.boolean().optional(),
+            context: z.record(z.any()).optional()
         }, async (params, extra) => {
             await this.ensureInitialized();
             return {
                 content: [{
                         type: "text",
-                        text: "Help information"
+                        text: "Available tools: help, init_model, train_step, forward_pass, get_memory_state"
                     }]
             };
         });
@@ -139,7 +211,7 @@ export class TitanMemoryServer {
         this.server.tool('train_step', {
             x_t: z.union([z.string(), z.array(z.number())]),
             x_next: z.union([z.string(), z.array(z.number())])
-        }, async ({ x_t, x_next }, extra) => {
+        }, async (params, extra) => {
             await this.ensureInitialized();
             return {
                 content: [{
@@ -151,22 +223,19 @@ export class TitanMemoryServer {
         // Forward pass tool with memory validation
         this.server.tool('forward_pass', {
             x: z.union([z.string(), z.number(), z.array(z.number()), z.custom()])
-        }, async ({ x }) => {
-            await this.ensureInitialized();
+        }, async (params) => {
+            if (params.x === null || params.x === undefined) {
+                throw new Error('Input x must be provided');
+            }
             return this.wrapWithMemoryManagementAsync(async () => {
-                if (x === null || x === undefined) {
-                    throw new Error('Input x must be provided');
-                }
-                let xT;
                 try {
-                    if (typeof x === 'string') {
-                        // For string input, use encodeText to get proper dimensionality
-                        xT = await this.vectorProcessor.encodeText(x);
+                    let xT;
+                    if (typeof params.x === 'string') {
+                        xT = await this.vectorProcessor.encodeText(params.x);
                     }
                     else {
-                        xT = await this.vectorProcessor.processInput(x);
+                        xT = await this.vectorProcessor.processInput(params.x);
                     }
-                    // Ensure the tensor has the correct shape
                     const config = this.model.getConfig();
                     const normalizedXT = this.vectorProcessor.validateAndNormalize(xT, [config.inputDim]);
                     if (!this.validateMemoryState(this.memoryState)) {
@@ -203,40 +272,69 @@ export class TitanMemoryServer {
         this.server.tool('get_memory_state', {
             type: z.string().optional()
         }, async (params, extra) => {
-            await this.ensureInitialized();
-            const response = {
+            const state = {
+                shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
+                longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).dataSync()),
+                meta: Array.from(unwrapTensor(this.memoryState.meta).dataSync())
+            };
+            return {
                 content: [{
                         type: "text",
-                        text: "Memory state retrieved"
+                        text: JSON.stringify(state)
                     }]
             };
-            return response;
         });
     }
     async autoInitialize() {
+        if (this.isInitialized)
+            return;
         try {
+            // Create memory directory if it doesn't exist
             await fs.mkdir(this.memoryPath, { recursive: true });
-            if (!(await this.loadSavedState())) {
-                this.model = new TitanMemoryModel();
-                this.memoryState = this.wrapWithMemoryManagement(() => {
-                    const zeros = tf.zeros([768]);
-                    const slots = this.model.getConfig().memorySlots;
-                    return {
-                        shortTerm: wrapTensor(zeros),
-                        longTerm: wrapTensor(zeros.clone()),
-                        meta: wrapTensor(zeros.clone()),
-                        timestamps: wrapTensor(tf.zeros([slots])),
-                        accessCounts: wrapTensor(tf.zeros([slots])),
-                        surpriseHistory: wrapTensor(tf.zeros([slots]))
-                    };
-                });
-                await this.saveMemoryState();
+            if (!this.testMode) {
+                // Try to load existing model and state
+                const loaded = await this.loadSavedState();
+                if (!loaded) {
+                    // Only initialize new model if loading fails and not in test mode
+                    this.model = new TitanMemoryModel({
+                        inputDim: 768,
+                        hiddenDim: 512,
+                        memoryDim: 1024,
+                        transformerLayers: 6,
+                        numHeads: 8,
+                        ffDimension: 2048,
+                        dropoutRate: 0.1,
+                        maxSequenceLength: 512,
+                        memorySlots: 5000,
+                        similarityThreshold: 0.65,
+                        surpriseDecay: 0.9,
+                        pruningInterval: 1000,
+                        gradientClip: 1.0,
+                        learningRate: 0.001,
+                        vocabSize: 50000
+                    });
+                    // Initialize empty memory state
+                    this.memoryState = this.wrapWithMemoryManagement(() => {
+                        const zeros = tf.zeros([768]);
+                        const slots = this.model.getConfig().memorySlots;
+                        return {
+                            shortTerm: wrapTensor(zeros),
+                            longTerm: wrapTensor(zeros.clone()),
+                            meta: wrapTensor(zeros.clone()),
+                            timestamps: wrapTensor(tf.zeros([slots])),
+                            accessCounts: wrapTensor(tf.zeros([slots])),
+                            surpriseHistory: wrapTensor(tf.zeros([slots]))
+                        };
+                    });
+                }
             }
-            if (!this.autoSaveInterval) {
+            // Set up auto-save interval for non-test mode
+            if (!this.testMode && !this.autoSaveInterval) {
                 this.autoSaveInterval = setInterval(async () => {
                     await this.saveMemoryState().catch(console.error);
-                }, 300000);
+                }, 300000); // Save every 5 minutes
             }
+            this.isInitialized = true;
         }
         catch (error) {
             console.error('Initialization failed:', error instanceof Error ? error.message : error);
@@ -303,6 +401,38 @@ export class TitanMemoryServer {
             await this.autoInitialize();
             const transport = new StdioServerTransport();
             await this.server.connect(transport);
+            // Send server info for Cursor Composer
+            transport.send({
+                jsonrpc: "2.0",
+                method: "server.info",
+                params: {
+                    name: "Titan Memory",
+                    version: "1.2.0",
+                    description: "A memory-augmented model server for Cursor",
+                    tools: [
+                        {
+                            name: "help",
+                            description: "Get help about available tools"
+                        },
+                        {
+                            name: "init_model",
+                            description: "Initialize or reset the model"
+                        },
+                        {
+                            name: "train_step",
+                            description: "Perform a training step"
+                        },
+                        {
+                            name: "forward_pass",
+                            description: "Perform a forward pass through the model"
+                        },
+                        {
+                            name: "get_memory_state",
+                            description: "Get the current memory state"
+                        }
+                    ]
+                }
+            });
             transport.send({
                 jsonrpc: "2.0",
                 method: "log",
@@ -333,17 +463,3 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         process.exit(1);
     });
 }
-// Define parameter schemas
-const HelpParams = z.object({
-    tool: z.string().optional(),
-    category: z.string().optional(),
-    showExamples: z.boolean().optional(),
-    verbose: z.boolean().optional(),
-    interactive: z.boolean().optional(),
-    context: z.record(z.any()).optional()
-});
-const InitModelParams = z.object({
-    inputDim: z.number().int().positive().optional(),
-    memorySlots: z.number().int().positive().optional(),
-    transformerLayers: z.number().int().positive().optional()
-});
