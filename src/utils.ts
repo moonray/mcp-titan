@@ -204,4 +204,65 @@ export class AutomaticMemoryMaintenance {
             this.maintenanceInterval = null;
         }
     }
+}
+
+// Utility functions for tensor operations
+export function checkNullOrUndefined(value: any): boolean {
+    return value === null || value === undefined;
+}
+
+export function validateTensor(tensor: tf.Tensor | null | undefined): boolean {
+    return !checkNullOrUndefined(tensor) && !tensor!.isDisposed;
+}
+
+export function validateTensorShape(tensor: tf.Tensor | null | undefined, expectedShape: number[]): boolean {
+    if (!validateTensor(tensor)) return false;
+    const shape = tensor!.shape;
+    if (shape.length !== expectedShape.length) return false;
+    return shape.every((dim, i) => expectedShape[i] === -1 || expectedShape[i] === dim);
+}
+
+// Safe tensor operations that handle null checks
+export class SafeTensorOps {
+    static reshape(tensor: tf.Tensor, shape: number[]): tf.Tensor {
+        if (!validateTensor(tensor)) {
+            throw new Error('Invalid tensor for reshape operation');
+        }
+        return tf.reshape(tensor, shape);
+    }
+
+    static matMul(a: tf.Tensor, b: tf.Tensor): tf.Tensor {
+        if (!validateTensor(a) || !validateTensor(b)) {
+            throw new Error('Invalid tensors for matMul operation');
+        }
+        return tf.matMul(a, b);
+    }
+
+    static add(a: tf.Tensor, b: tf.Tensor): tf.Tensor {
+        if (!validateTensor(a) || !validateTensor(b)) {
+            throw new Error('Invalid tensors for add operation');
+        }
+        return tf.add(a, b);
+    }
+
+    static sub(a: tf.Tensor, b: tf.Tensor): tf.Tensor {
+        if (!validateTensor(a) || !validateTensor(b)) {
+            throw new Error('Invalid tensors for sub operation');
+        }
+        return tf.sub(a, b);
+    }
+
+    static mul(a: tf.Tensor, b: tf.Tensor): tf.Tensor {
+        if (!validateTensor(a) || !validateTensor(b)) {
+            throw new Error('Invalid tensors for mul operation');
+        }
+        return tf.mul(a, b);
+    }
+
+    static div(a: tf.Tensor, b: tf.Tensor): tf.Tensor {
+        if (!validateTensor(a) || !validateTensor(b)) {
+            throw new Error('Invalid tensors for div operation');
+        }
+        return tf.div(a, b);
+    }
 } 

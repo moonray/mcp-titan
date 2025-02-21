@@ -54,108 +54,80 @@
         }
       },
       "init_model": {
-        "description": "Initialize the Titan Memory model for learning code patterns",
+        "description": "Initialize the Titan Memory model with specified parameters",
         "parameters": {
-          "type": "object",
-          "properties": {
-            "inputDim": {
-              "type": "number",
-              "description": "Size of input vectors (default: 768)"
-            },
-            "memorySlots": {
-              "type": "number",
-              "description": "Number of memory slots (default: 5000)"
-            },
-            "transformerLayers": {
-              "type": "number",
-              "description": "Number of transformer layers (default: 6)"
-            }
+          "inputDim": {
+            "type": "number",
+            "description": "Input dimension size",
+            "required": true
+          },
+          "memorySlots": {
+            "type": "number",
+            "description": "Number of memory slots",
+            "required": true
+          },
+          "transformerLayers": {
+            "type": "number",
+            "description": "Number of transformer layers",
+            "required": true
           }
         }
       },
       "forward_pass": {
-        "description": "Process input through the memory model",
+        "description": "Perform a forward pass through the model",
         "parameters": {
-          "type": "object",
-          "properties": {
-            "x": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "description": "Text input to process"
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "number"
-                  },
-                  "description": "Vector input to process"
-                }
-              ]
-            }
-          },
-          "required": [
-            "x"
-          ]
+          "x": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "Input tensor",
+            "required": true
+          }
         }
       },
       "train_step": {
-        "description": "Train the model on sequential inputs",
+        "description": "Execute a training step with current and next inputs",
         "parameters": {
-          "type": "object",
-          "properties": {
-            "x_t": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "description": "Current text input"
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "number"
-                  },
-                  "description": "Current vector input"
-                }
-              ]
+          "x_t": {
+            "type": "array",
+            "items": {
+              "type": "number"
             },
-            "x_next": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "description": "Next text input"
-                },
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "number"
-                  },
-                  "description": "Next vector input"
-                }
-              ]
-            }
+            "description": "Current input tensor",
+            "required": true
           },
-          "required": [
-            "x_t",
-            "x_next"
-          ]
+          "x_next": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "Next input tensor",
+            "required": true
+          }
         }
       },
       "get_memory_state": {
         "description": "Get the current memory state",
+        "parameters": {}
+      },
+      "save_memory_state": {
+        "description": "Save the current memory state to a file",
         "parameters": {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "description": "Type of memory state to retrieve",
-              "enum": [
-                "short_term",
-                "long_term",
-                "meta",
-                "all"
-              ]
-            }
+          "path": {
+            "type": "string",
+            "description": "Path to save the memory state",
+            "required": true
+          }
+        }
+      },
+      "load_memory_state": {
+        "description": "Load a memory state from a file",
+        "parameters": {
+          "path": {
+            "type": "string",
+            "description": "Path to load the memory state from",
+            "required": true
           }
         }
       }
@@ -163,18 +135,18 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.5.0",
-    "@tensorflow/tfjs": "^4.22.0",
-    "@tensorflow/tfjs-core": "^4.22.0",
-    "@tensorflow/tfjs-node": "^4.22.0",
+    "@tensorflow/tfjs": "4.22.0",
+    "@tensorflow/tfjs-core": "4.22.0",
+    "@tensorflow/tfjs-node": "4.22.0",
     "express": "^4.21.2",
-    "ws": "^8.18.0",
+    "ws": "^8.18.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@tsconfig/node23": "^23.0.0",
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.14",
-    "@types/node": "^22.13.4",
+    "@types/node": "^22.13.5",
     "@types/ws": "^8.5.14",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5",

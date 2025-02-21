@@ -1,3 +1,6 @@
+// Import polyfills first
+import './utils/polyfills.js';
+
 // Henry's Titan Memory Server
 import { z } from "zod";
 import * as tf from '@tensorflow/tfjs-node';
@@ -58,7 +61,7 @@ export class TitanMemoryServer {
     this.vectorProcessor = VectorProcessor.getInstance();
     this.memoryPath = options.memoryPath || path.join(process.cwd(), '.titan_memory');
     this.modelPath = path.join(this.memoryPath, 'model.json');
-    this.weightsPath = path.join(this.memoryPath, 'weights.bin');
+    this.weightsPath = path.join(this.memoryPath, 'model.weights.bin');
     this.memoryState = this.initializeEmptyState();
 
     this.registerTools();
@@ -99,14 +102,21 @@ export class TitanMemoryServer {
 
   private validateMemoryState(state: IMemoryState): boolean {
     return tf.tidy(() => {
-      return (
-        state.shortTerm !== undefined &&
-        state.longTerm !== undefined &&
-        state.meta !== undefined &&
-        state.timestamps !== undefined &&
-        state.accessCounts !== undefined &&
-        state.surpriseHistory !== undefined
-      );
+      try {
+        const validations = [
+          state.shortTerm && !unwrapTensor(state.shortTerm).isDisposed,
+          state.longTerm && !unwrapTensor(state.longTerm).isDisposed,
+          state.meta && !unwrapTensor(state.meta).isDisposed,
+          state.timestamps && !unwrapTensor(state.timestamps).isDisposed,
+          state.accessCounts && !unwrapTensor(state.accessCounts).isDisposed,
+          state.surpriseHistory && !unwrapTensor(state.surpriseHistory).isDisposed
+        ];
+
+        return validations.every(Boolean);
+      } catch (error) {
+        console.warn('Error validating memory state:', error);
+        return false;
+      }
     });
   }
 
@@ -118,253 +128,289 @@ export class TitanMemoryServer {
   }
 
   private registerTools(): void {
-    // Help tool with improved schema validation
+    // Help tool
     this.server.tool(
       'help',
       {
         tool: z.string().optional(),
         category: z.string().optional(),
-        showExamples: z.boolean().optional().default(false),
-        verbose: z.boolean().optional().default(false),
-        interactive: z.boolean().optional().default(false),
-        context: z.record(z.any()).optional().default({})
+        showExamples: z.boolean().optional(),
+        verbose: z.boolean().optional()
       },
-      async (params: z.infer<typeof HelpParams>, extra: RequestHandlerExtra): Promise<ToolResponse> => {
-        await this.ensureInitialized();
-        return {
-          content: [{
-            type: "text" as const,
-            text: "Help information"
-          }]
-        };
-      }
-    );
-
-    // Init model tool with memory safety
-    this.server.tool(
-      'init_model',
-      {
-        inputDim: z.number().int().positive().optional(),
-        memorySlots: z.number().int().positive().optional(),
-        transformerLayers: z.number().int().positive().optional()
-      },
-      async (params: z.infer<typeof InitModelParams>, extra: RequestHandlerExtra): Promise<ToolResponse> => {
-        if (this.isInitialized) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: "Model already initialized"
-            }]
-          };
-        }
-
-        return this.wrapWithMemoryManagementAsync(async () => {
-          this.model = new TitanMemoryModel(params);
-          const config = this.model.getConfig();
-          const zeros = tf.tidy(() => tf.zeros([config.inputDim]));
-
-          try {
-            const slots = config.memorySlots;
-            this.memoryState = {
-              shortTerm: wrapTensor(zeros.clone()),
-              longTerm: wrapTensor(zeros.clone()),
-              meta: wrapTensor(zeros.clone()),
-              timestamps: wrapTensor(tf.zeros([slots])),
-              accessCounts: wrapTensor(tf.zeros([slots])),
-              surpriseHistory: wrapTensor(tf.zeros([slots]))
-            };
-          } finally {
-            zeros.dispose();
-          }
-
-          this.isInitialized = true;
-          return {
-            content: [{
-              type: "text" as const,
-              text: `Model initialized with configuration: ${JSON.stringify(config)}`
-            }]
-          };
-        });
-      }
-    );
-
-    // Train step tool with enhanced validation
-    this.server.tool(
-      'train_step',
-      {
-        x_t: z.union([z.string(), z.array(z.number())]),
-        x_next: z.union([z.string(), z.array(z.number())])
-      },
-      async ({ x_t, x_next }: { x_t: string | number[]; x_next: string | number[] }, extra: RequestHandlerExtra): Promise<ToolResponse> => {
+      async (params, extra) => {
         await this.ensureInitialized();
         return {
           content: [{
             type: "text",
-            text: "Training step completed"
+            text: "Available tools:\n" +
+              "- help: Get help about available tools\n" +
+              "- init_model: Initialize the Titan Memory model\n" +
+              "- forward_pass: Perform a forward pass through the model\n" +
+              "- train_step: Execute a training step\n" +
+              "- get_memory_state: Get current memory state\n" +
+              "- save_memory_state: Save memory state to file\n" +
+              "- load_memory_state: Load memory state from file"
           }]
         };
       }
     );
 
-    // Forward pass tool with memory validation
+    // Init model tool
+    this.server.tool(
+      'init_model',
+      {
+        inputDim: z.number().int().positive(),
+        memorySlots: z.number().int().positive(),
+        transformerLayers: z.number().int().positive()
+      },
+      async (params, extra) => {
+        await this.ensureInitialized();
+        const config = {
+          inputDim: params.inputDim,
+          memorySlots: params.memorySlots,
+          transformerLayers: params.transformerLayers
+        };
+        await this.model.initialize(config);
+        return {
+          content: [{
+            type: "text",
+            text: `Model initialized with configuration: ${JSON.stringify(config)}`
+          }]
+        };
+      }
+    );
+
+    // Forward pass tool
     this.server.tool(
       'forward_pass',
       {
-        x: z.union([z.string(), z.array(z.number()), z.custom<tf.Tensor>()])
+        x: z.array(z.number())
       },
-      async ({ x }): Promise<ToolResponse> => {
+      async (params, extra) => {
         await this.ensureInitialized();
-
-        return this.wrapWithMemoryManagementAsync(async () => {
-          if (!x) {
-            throw new Error('Input x must be provided');
-          }
-
-          const xT = await this.vectorProcessor.processInput(x);
-          const normalizedXT = this.vectorProcessor.validateAndNormalize(
-            xT,
-            [this.model.getConfig().inputDim]
-          );
-
-          if (!this.validateMemoryState(this.memoryState)) {
-            throw new Error('Invalid memory state');
-          }
-
-          const xReshaped = tf.tidy(() => unwrapTensor(normalizedXT).reshape([1, -1]));
-
-          const { predicted, memoryUpdate } = this.model.forward(
-            wrapTensor(xReshaped),
-            this.memoryState
-          );
-
-          this.memoryState = memoryUpdate.newState;
-
-          const result = {
-            predicted: Array.from(unwrapTensor(predicted).dataSync()),
-            memory: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
-            surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
-          };
-
-          xReshaped.dispose();
-
-          return {
-            content: [{
-              type: "text" as const,
-              text: JSON.stringify(result)
-            }]
-          };
-        });
+        const input = tf.tensor2d([params.x]);
+        const result = await this.model.forward(wrapTensor(input), this.memoryState);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              predicted: Array.from(unwrapTensor(result.predicted).dataSync()),
+              surprise: Array.from(unwrapTensor(result.memoryUpdate.surprise.immediate).dataSync())
+            })
+          }]
+        };
       }
     );
 
-    // Memory state tool with typed response
+    // Train step tool
     this.server.tool(
-      'get_memory_state',
+      'train_step',
       {
-        type: z.string().optional()
+        x_t: z.array(z.number()),
+        x_next: z.array(z.number())
       },
-      async (params: { type?: string }, extra: RequestHandlerExtra): Promise<ToolResponse> => {
+      async (params, extra) => {
         await this.ensureInitialized();
-        const response: ToolResponse = {
+        const x_t = tf.tensor2d([params.x_t]);
+        const x_next = tf.tensor2d([params.x_next]);
+        const result = await this.model.trainStep(wrapTensor(x_t), wrapTensor(x_next), this.memoryState);
+        return {
           content: [{
-            type: "text" as const,
-            text: "Memory state retrieved"
+            type: "text",
+            text: JSON.stringify({
+              loss: Array.from(unwrapTensor(result.loss).dataSync())
+            })
           }]
         };
-        return response;
+      }
+    );
+
+    // Get memory state tool
+    this.server.tool(
+      'get_memory_state',
+      {},
+      async (params, extra) => {
+        await this.ensureInitialized();
+        const state = this.model.getMemorySnapshot();
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              shortTerm: Array.from(state.shortTerm.dataSync()),
+              longTerm: Array.from(state.longTerm.dataSync()),
+              meta: Array.from(state.meta.dataSync())
+            })
+          }]
+        };
+      }
+    );
+
+    // Save memory state tool
+    this.server.tool(
+      'save_memory_state',
+      {
+        path: z.string()
+      },
+      async (params, extra) => {
+        await this.ensureInitialized();
+        await this.model.saveModel(params.path);
+        return {
+          content: [{
+            type: "text",
+            text: `Memory state saved to ${params.path}`
+          }]
+        };
+      }
+    );
+
+    // Load memory state tool
+    this.server.tool(
+      'load_memory_state',
+      {
+        path: z.string()
+      },
+      async (params, extra) => {
+        await this.ensureInitialized();
+        await this.model.loadModel(params.path);
+        return {
+          content: [{
+            type: "text",
+            text: `Memory state loaded from ${params.path}`
+          }]
+        };
       }
     );
   }
 
   private async processInput(input: string | number[] | tf.Tensor | number): Promise<tf.Tensor> {
     return tf.tidy(() => {
-      if (typeof input === 'string') {
-        // Convert string to vector of proper size
-        const encoder = new TextEncoder();
-        const bytes = encoder.encode(input);
-        const paddedBytes = new Uint8Array(768); // Initialize with zeros
-        paddedBytes.set(bytes.slice(0, 768)); // Take first 768 bytes or pad with zeros
-        return tf.tensor1d(Array.from(paddedBytes)).div(255); // Normalize to [0,1]
-      } else if (Array.isArray(input)) {
-        // Pad or truncate array to match expected size
-        const paddedArray = new Array(768).fill(0);
-        paddedArray.splice(0, Math.min(input.length, 768), ...input.slice(0, 768));
-        return tf.tensor1d(paddedArray);
-      } else if (input instanceof tf.Tensor) {
-        // Ensure tensor is flattened and reshaped to 768 dimensions
-        const flattenedData = tf.tidy(() => {
+      try {
+        if (typeof input === 'string') {
+          // Convert string to bytes and pad/truncate to exactly 768 elements
+          const encoder = new TextEncoder();
+          const bytes = encoder.encode(input);
+          const paddedArray = new Float32Array(768).fill(0);
+
+          // Copy bytes and normalize to [0,1]
+          for (let i = 0; i < Math.min(bytes.length, 768); i++) {
+            paddedArray[i] = bytes[i] / 255;
+          }
+
+          return tf.tensor1d(paddedArray);
+        } else if (Array.isArray(input)) {
+          // Pad or truncate array to exactly 768 elements
+          const paddedArray = new Float32Array(768).fill(0);
+          const inputArray = input.slice(0, 768);
+          paddedArray.set(inputArray);
+          return tf.tensor1d(paddedArray);
+        } else if (input instanceof tf.Tensor) {
+          // Ensure tensor is flattened and has exactly 768 elements
           const flattened = input.flatten();
           const inputData = flattened.dataSync();
           const paddedData = new Float32Array(768).fill(0);
           paddedData.set(Array.from(inputData).slice(0, 768));
+
+          // Clean up intermediate tensor
+          if (flattened !== input) {
+            flattened.dispose();
+          }
+
           return tf.tensor1d(paddedData);
-        });
-        return flattenedData;
-      } else if (typeof input === 'number') {
-        // Create a tensor of proper size filled with the number
-        return tf.ones([768]).mul(tf.scalar(input));
+        } else if (typeof input === 'number') {
+          // Create a tensor of 768 elements filled with the input number
+          return tf.ones([768]).mul(tf.scalar(input));
+        }
+        throw new Error('Invalid input type');
+      } catch (error) {
+        console.error('Error processing input:', error);
+        throw error;
       }
-      throw new Error('Invalid input type');
     });
   }
 
   private async autoInitialize(): Promise<void> {
     try {
+      // Initialize TensorFlow.js backend first
+      await tf.ready();
+      await tf.setBackend('tensorflow');
+
+      // Verify backend is ready
+      const backend = tf.getBackend();
+      if (!backend) {
+        throw new Error('Failed to initialize TensorFlow.js backend');
+      }
+
+      console.log('TensorFlow backend initialized:', backend);
+
+      // Ensure memory directory exists
       await fs.mkdir(this.memoryPath, { recursive: true });
 
-      // Initialize model first
+      // Initialize model with backend verification
       this.model = new TitanMemoryModel({
         inputDim: 768,
         memorySlots: 5000,
         transformerLayers: 6
       });
 
-      // Initialize memory state with proper dimensions
-      this.memoryState = tf.tidy(() => {
-        const zeros = tf.zeros([768]);
-        const slots = this.model.getConfig().memorySlots;
-        return {
-          shortTerm: wrapTensor(zeros.clone()),
-          longTerm: wrapTensor(zeros.clone()),
-          meta: wrapTensor(zeros.clone()),
-          timestamps: wrapTensor(tf.zeros([slots])),
-          accessCounts: wrapTensor(tf.zeros([slots])),
-          surpriseHistory: wrapTensor(tf.zeros([slots]))
-        };
-      });
+      // Initialize the model (this will set up the backend)
+      await this.model.initialize();
 
       // Try to load saved state if exists
-      const [modelExists, weightsExist] = await Promise.all([
-        fs.access(this.modelPath).then(() => true).catch(() => false),
-        fs.access(this.weightsPath).then(() => true).catch(() => false)
-      ]);
+      try {
+        const [modelExists, weightsExist, memoryStateExists] = await Promise.all([
+          fs.access(this.modelPath).then(() => true).catch(() => false),
+          fs.access(this.weightsPath).then(() => true).catch(() => false),
+          fs.access(path.join(this.memoryPath, 'memory_state.json')).then(() => true).catch(() => false)
+        ]);
 
-      if (modelExists && weightsExist) {
-        try {
+        if (modelExists && weightsExist) {
+          console.log('Found existing model and weights, loading...');
           await this.model.loadModel(this.modelPath);
-          const memoryStateJson = await fs.readFile(
-            path.join(this.memoryPath, 'memory_state.json'),
-            'utf8'
-          );
-          const memoryState = JSON.parse(memoryStateJson) as SerializedMemoryState;
 
-          this.memoryState = tf.tidy(() => ({
-            shortTerm: wrapTensor(tf.tensor1d(memoryState.shortTerm)),
-            longTerm: wrapTensor(tf.tensor1d(memoryState.longTerm)),
-            meta: wrapTensor(tf.tensor1d(memoryState.meta)),
-            timestamps: wrapTensor(tf.tensor1d(memoryState.timestamps)),
-            accessCounts: wrapTensor(tf.tensor1d(memoryState.accessCounts)),
-            surpriseHistory: wrapTensor(tf.tensor1d(memoryState.surpriseHistory))
-          }));
-        } catch (loadError) {
-          console.warn('Failed to load saved state, using initialized state:', loadError);
+          if (memoryStateExists) {
+            console.log('Found existing memory state, loading...');
+            const memoryStateJson = await fs.readFile(
+              path.join(this.memoryPath, 'memory_state.json'),
+              'utf8'
+            );
+            const memoryState = JSON.parse(memoryStateJson) as SerializedMemoryState;
+
+            // Load memory state within a tidy block
+            this.memoryState = tf.tidy(() => ({
+              shortTerm: wrapTensor(tf.tensor1d(memoryState.shortTerm)),
+              longTerm: wrapTensor(tf.tensor1d(memoryState.longTerm)),
+              meta: wrapTensor(tf.tensor1d(memoryState.meta)),
+              timestamps: wrapTensor(tf.tensor1d(memoryState.timestamps)),
+              accessCounts: wrapTensor(tf.tensor1d(memoryState.accessCounts)),
+              surpriseHistory: wrapTensor(tf.tensor1d(memoryState.surpriseHistory))
+            }));
+          } else {
+            console.log('No saved memory state found, initializing new state');
+            this.memoryState = this.initializeEmptyState();
+            await this.saveMemoryState();
+          }
+        } else {
+          console.log('No saved model found, initializing new model and state');
+          await this.model.saveModel(this.modelPath);
+          this.memoryState = this.initializeEmptyState();
+          await this.saveMemoryState();
         }
+      } catch (loadError) {
+        console.error('Error loading saved state:', loadError);
+        console.log('Initializing new model and state');
+        this.memoryState = this.initializeEmptyState();
+        await this.model.saveModel(this.modelPath);
+        await this.saveMemoryState();
       }
 
       if (!this.autoSaveInterval) {
         this.autoSaveInterval = setInterval(async () => {
-          await this.saveMemoryState().catch(console.error);
-        }, 300000);
+          try {
+            await this.saveMemoryState();
+          } catch (error) {
+            console.error('Failed to auto-save memory state:', error);
+          }
+        }, 300000); // Save every 5 minutes
       }
 
       this.isInitialized = true;
@@ -407,38 +453,74 @@ export class TitanMemoryServer {
   }
 
   private async saveMemoryState(): Promise<void> {
+    // Start a new scope for memory management
+    tf.engine().startScope();
+
     try {
+      // Save model first
       await this.model.saveModel(this.modelPath);
-      const memoryState = this.wrapWithMemoryManagement(() => {
-        const state = {
-          shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()) as number[],
-          longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).dataSync()) as number[],
-          meta: Array.from(unwrapTensor(this.memoryState.meta).dataSync()) as number[],
-          timestamps: Array.from(unwrapTensor(this.memoryState.timestamps).dataSync()) as number[],
-          accessCounts: Array.from(unwrapTensor(this.memoryState.accessCounts).dataSync()) as number[],
-          surpriseHistory: Array.from(unwrapTensor(this.memoryState.surpriseHistory).dataSync()) as number[]
+
+      // Clone and get memory state data within a tidy block
+      const memoryState = tf.tidy(() => {
+        // Validate tensors before accessing
+        if (!this.validateMemoryState(this.memoryState)) {
+          throw new Error('Invalid memory state during save');
+        }
+
+        // Clone tensors to prevent disposal issues
+        return {
+          shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).clone().dataSync()),
+          longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).clone().dataSync()),
+          meta: Array.from(unwrapTensor(this.memoryState.meta).clone().dataSync()),
+          timestamps: Array.from(unwrapTensor(this.memoryState.timestamps).clone().dataSync()),
+          accessCounts: Array.from(unwrapTensor(this.memoryState.accessCounts).clone().dataSync()),
+          surpriseHistory: Array.from(unwrapTensor(this.memoryState.surpriseHistory).clone().dataSync())
         };
-        return state;
       });
 
-      const encryptedState = Buffer.concat([
-        this.encryptTensor(tf.tensor(memoryState.shortTerm)),
-        this.encryptTensor(tf.tensor(memoryState.longTerm)),
-        this.encryptTensor(tf.tensor(memoryState.meta)),
-        this.encryptTensor(tf.tensor(memoryState.timestamps)),
-        this.encryptTensor(tf.tensor(memoryState.accessCounts)),
-        this.encryptTensor(tf.tensor(memoryState.surpriseHistory))
-      ]);
+      // Create encrypted state with proper tensor lifecycle management
+      const encryptedState = tf.tidy(() => {
+        const tensors = [
+          tf.tensor(memoryState.shortTerm),
+          tf.tensor(memoryState.longTerm),
+          tf.tensor(memoryState.meta),
+          tf.tensor(memoryState.timestamps),
+          tf.tensor(memoryState.accessCounts),
+          tf.tensor(memoryState.surpriseHistory)
+        ];
+
+        const encryptedBuffers = tensors.map(tensor => {
+          const encrypted = this.encryptTensor(tensor);
+          return Buffer.from(encrypted);
+        });
+
+        return Buffer.concat(encryptedBuffers);
+      });
 
       await fs.writeFile(this.weightsPath, encryptedState);
-    } catch (error: unknown) {
-      console.error('Failed to save memory state:', error instanceof Error ? error.message : error);
+    } catch (error) {
+      console.error('Failed to save memory state:', error);
       throw error;
+    } finally {
+      tf.engine().endScope();
     }
   }
 
   public async run(): Promise<void> {
     try {
+      // Initialize TensorFlow.js backend first
+      await tf.ready();
+      await tf.setBackend('tensorflow');
+
+      // Verify backend is ready
+      const backend = tf.getBackend();
+      if (!backend) {
+        throw new Error('Failed to initialize TensorFlow.js backend');
+      }
+
+      console.log('TensorFlow backend initialized:', backend);
+
+      // Initialize server
       await this.autoInitialize();
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
