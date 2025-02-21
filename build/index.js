@@ -44,65 +44,160 @@ export class TitanMemoryServer {
     modelPath;
     weightsPath;
     testMode;
+    toolSchemas;
     constructor(options = {}) {
-        this.server = new McpServer({
-            name: "Titan Memory",
-            version: "1.2.0",
-            description: "A memory-augmented model server for Cursor",
-            capabilities: {
-                tools: {
-                    help: {
-                        description: "Get help about available tools",
-                        parameters: HelpParams
+        console.log("Initializing TitanMemoryServer...");
+        this.testMode = options.testMode ?? false;
+        this.memoryPath = options.memoryPath ?? path.join(process.cwd(), 'memory.json');
+        this.modelPath = path.join(process.cwd(), 'model.json');
+        this.weightsPath = path.join(process.cwd(), 'weights.bin');
+        this.toolSchemas = {
+            help: {
+                description: "Get help about available tools",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        tool: { type: "string", description: "Tool to get help for" },
+                        category: { type: "string", description: "Category of tools" },
+                        showExamples: { type: "boolean", description: "Show examples" },
+                        verbose: { type: "boolean", description: "Show detailed info" }
+                    }
+                }
+            },
+            init_model: {
+                description: "Initialize the memory model",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        inputDim: { type: "number", description: "Input dimension" },
+                        memorySlots: { type: "number", description: "Memory slot count" },
+                        transformerLayers: { type: "number", description: "Transformer layers" }
+                    }
+                }
+            },
+            forward_pass: {
+                description: "Process input through model",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        x: {
+                            oneOf: [
+                                { type: "string", description: "Text input" },
+                                {
+                                    type: "array",
+                                    items: { type: "number" },
+                                    description: "Vector input"
+                                }
+                            ]
+                        }
                     },
-                    init_model: {
-                        description: "Initialize or reset the model",
-                        parameters: InitModelParams
+                    required: ["x"]
+                }
+            },
+            train_step: {
+                description: "Train on sequential inputs",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        x_t: {
+                            oneOf: [
+                                { type: "string", description: "Current text" },
+                                {
+                                    type: "array",
+                                    items: { type: "number" },
+                                    description: "Current vector"
+                                }
+                            ]
+                        },
+                        x_next: {
+                            oneOf: [
+                                { type: "string", description: "Next text" },
+                                {
+                                    type: "array",
+                                    items: { type: "number" },
+                                    description: "Next vector"
+                                }
+                            ]
+                        }
                     },
-                    train_step: {
-                        description: "Perform a training step",
-                        parameters: TrainStepParams
-                    },
-                    forward_pass: {
-                        description: "Perform a forward pass through the model",
-                        parameters: ForwardPassParams
-                    },
-                    get_memory_state: {
-                        description: "Get the current memory state",
-                        parameters: GetMemoryStateParams
+                    required: ["x_t", "x_next"]
+                }
+            },
+            get_memory_state: {
+                description: "Get memory state",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        type: {
+                            type: "string",
+                            enum: ["short_term", "long_term", "meta", "all"],
+                            description: "Memory type"
+                        }
                     }
                 }
             }
-        });
+        };
+        // Initialize components
         this.vectorProcessor = VectorProcessor.getInstance();
-        this.memoryPath = options.memoryPath || path.join(process.cwd(), '.titan_memory');
-        this.modelPath = path.join(this.memoryPath, 'model.json');
-        this.weightsPath = path.join(this.memoryPath, 'weights.bin');
-        this.testMode = options.testMode || false;
-        this.memoryState = this.initializeEmptyState();
-        if (this.testMode) {
-            // Initialize model with default configuration in test mode
-            this.model = new TitanMemoryModel({
-                inputDim: 768,
-                hiddenDim: 512,
-                memoryDim: 1024,
-                transformerLayers: 6,
-                numHeads: 8,
-                ffDimension: 2048,
-                dropoutRate: 0.1,
-                maxSequenceLength: 512,
-                memorySlots: 5000,
-                similarityThreshold: 0.65,
-                surpriseDecay: 0.9,
-                pruningInterval: 1000,
-                gradientClip: 1.0,
-                learningRate: 0.001,
-                vocabSize: 50000
-            });
-        }
-        this.registerTools();
+        this.memoryState = this.initializeMemoryState();
+        console.log("Components initialized");
+        // Initialize server and register tools
+        this.initializeServer();
+        console.log("Server initialized with tools");
     }
-    initializeEmptyState() {
+    initializeServer() {
+        // Create server with tools schema
+        this.server = new McpServer({
+            name: "Titan Memory",
+            version: "1.3.1",
+            description: "Memory-augmented model server",
+            transport: "stdio",
+            tools: this.toolSchemas
+        });
+        // Register tool handlers
+        this.server.tool("help", HelpParams.shape, async (params, extra) => ({
+            success: true,
+            content: [{ type: "text", text: "Available tools: help, init_model, forward_pass, train_step, get_memory_state" }]
+        }));
+        this.server.tool("init_model", InitModelParams.shape, async (params, extra) => {
+            await this.ensureInitialized();
+            return { success: true, content: [{ type: "text", text: "Model initialized" }] };
+        });
+        this.server.tool("forward_pass", ForwardPassParams.shape, async (params, extra) => {
+            await this.ensureInitialized();
+            const input = await this.processInput(params.x);
+            const result = await this.model.forward(input, this.memoryState);
+            return { success: true, content: [{ type: "text", text: "Forward pass complete" }], data: result };
+        });
+        this.server.tool("train_step", TrainStepParams.shape, async (params, extra) => {
+            await this.ensureInitialized();
+            const x_t = await this.processInput(params.x_t);
+            const x_next = await this.processInput(params.x_next);
+            const result = await this.model.trainStep(x_t, x_next, this.memoryState);
+            return { success: true, content: [{ type: "text", text: "Training complete" }], data: result };
+        });
+        this.server.tool("get_memory_state", GetMemoryStateParams.shape, async (params, extra) => {
+            await this.ensureInitialized();
+            const state = this.model.getMemorySnapshot();
+            return { success: true, content: [{ type: "text", text: "Memory state retrieved" }], data: state };
+        });
+    }
+    async processInput(input) {
+        if (typeof input === 'string') {
+            return this.vectorProcessor.encodeText(input);
+        }
+        else if (Array.isArray(input)) {
+            return tf.tensor(input);
+        }
+        else if (input instanceof tf.Tensor) {
+            return input;
+        }
+        else if (typeof input === 'number') {
+            return tf.scalar(input);
+        }
+        throw new Error('Invalid input type');
+    }
+    initializeMemoryState() {
         return tf.tidy(() => ({
             shortTerm: wrapTensor(tf.zeros([0])),
             longTerm: wrapTensor(tf.zeros([0])),
@@ -147,143 +242,6 @@ export class TitanMemoryServer {
             await this.autoInitialize();
             this.isInitialized = true;
         }
-    }
-    registerTools() {
-        // Help tool with improved schema validation
-        this.server.tool('help', {
-            tool: z.string().optional(),
-            category: z.string().optional(),
-            showExamples: z.boolean().optional(),
-            verbose: z.boolean().optional(),
-            interactive: z.boolean().optional(),
-            context: z.record(z.any()).optional()
-        }, async (params, extra) => {
-            await this.ensureInitialized();
-            return {
-                content: [{
-                        type: "text",
-                        text: "Available tools: help, init_model, train_step, forward_pass, get_memory_state"
-                    }]
-            };
-        });
-        // Init model tool with memory safety
-        this.server.tool('init_model', {
-            inputDim: z.number().int().positive().optional(),
-            memorySlots: z.number().int().positive().optional(),
-            transformerLayers: z.number().int().positive().optional()
-        }, async (params, extra) => {
-            if (this.isInitialized) {
-                return {
-                    content: [{
-                            type: "text",
-                            text: "Model already initialized"
-                        }]
-                };
-            }
-            return this.wrapWithMemoryManagementAsync(async () => {
-                this.model = new TitanMemoryModel(params);
-                const config = this.model.getConfig();
-                const zeros = tf.tidy(() => tf.zeros([config.inputDim]));
-                try {
-                    const slots = config.memorySlots;
-                    this.memoryState = {
-                        shortTerm: wrapTensor(zeros.clone()),
-                        longTerm: wrapTensor(zeros.clone()),
-                        meta: wrapTensor(zeros.clone()),
-                        timestamps: wrapTensor(tf.zeros([slots])),
-                        accessCounts: wrapTensor(tf.zeros([slots])),
-                        surpriseHistory: wrapTensor(tf.zeros([slots]))
-                    };
-                }
-                finally {
-                    zeros.dispose();
-                }
-                this.isInitialized = true;
-                return {
-                    content: [{
-                            type: "text",
-                            text: `Model initialized with configuration: ${JSON.stringify(config)}`
-                        }]
-                };
-            });
-        });
-        // Train step tool with enhanced validation
-        this.server.tool('train_step', {
-            x_t: z.union([z.string(), z.array(z.number())]),
-            x_next: z.union([z.string(), z.array(z.number())])
-        }, async (params, extra) => {
-            await this.ensureInitialized();
-            return {
-                content: [{
-                        type: "text",
-                        text: "Training step completed"
-                    }]
-            };
-        });
-        // Forward pass tool with memory validation
-        this.server.tool('forward_pass', {
-            x: z.union([z.string(), z.number(), z.array(z.number()), z.custom()])
-        }, async (params) => {
-            if (params.x === null || params.x === undefined) {
-                throw new Error('Input x must be provided');
-            }
-            return this.wrapWithMemoryManagementAsync(async () => {
-                try {
-                    let xT;
-                    if (typeof params.x === 'string') {
-                        xT = await this.vectorProcessor.encodeText(params.x);
-                    }
-                    else {
-                        xT = await this.vectorProcessor.processInput(params.x);
-                    }
-                    const config = this.model.getConfig();
-                    const normalizedXT = this.vectorProcessor.validateAndNormalize(xT, [config.inputDim]);
-                    if (!this.validateMemoryState(this.memoryState)) {
-                        throw new Error('Invalid memory state');
-                    }
-                    const xReshaped = tf.tidy(() => unwrapTensor(normalizedXT).reshape([1, -1]));
-                    const { predicted, memoryUpdate } = this.model.forward(wrapTensor(xReshaped), this.memoryState);
-                    this.memoryState = memoryUpdate.newState;
-                    const result = {
-                        predicted: Array.from(unwrapTensor(predicted).dataSync()),
-                        memory: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
-                        surprise: unwrapTensor(memoryUpdate.surprise.immediate).dataSync()[0]
-                    };
-                    xReshaped.dispose();
-                    return {
-                        content: [{
-                                type: "text",
-                                text: JSON.stringify(result)
-                            }]
-                    };
-                }
-                catch (error) {
-                    return {
-                        content: [{
-                                type: "text",
-                                text: error instanceof Error ? error.message : 'Unknown error occurred'
-                            }],
-                        isError: true
-                    };
-                }
-            });
-        });
-        // Memory state tool with typed response
-        this.server.tool('get_memory_state', {
-            type: z.string().optional()
-        }, async (params, extra) => {
-            const state = {
-                shortTerm: Array.from(unwrapTensor(this.memoryState.shortTerm).dataSync()),
-                longTerm: Array.from(unwrapTensor(this.memoryState.longTerm).dataSync()),
-                meta: Array.from(unwrapTensor(this.memoryState.meta).dataSync())
-            };
-            return {
-                content: [{
-                        type: "text",
-                        text: JSON.stringify(state)
-                    }]
-            };
-        });
     }
     async autoInitialize() {
         if (this.isInitialized)
@@ -398,56 +356,42 @@ export class TitanMemoryServer {
     }
     async run() {
         try {
+            console.log("Starting TitanMemoryServer...");
             await this.autoInitialize();
             const transport = new StdioServerTransport();
-            await this.server.connect(transport);
-            // Send server info for Cursor Composer
+            console.log("Transport created");
+            // Send server info before connecting
             transport.send({
                 jsonrpc: "2.0",
                 method: "server.info",
                 params: {
                     name: "Titan Memory",
-                    version: "1.2.0",
-                    description: "A memory-augmented model server for Cursor",
-                    tools: [
-                        {
-                            name: "help",
-                            description: "Get help about available tools"
-                        },
-                        {
-                            name: "init_model",
-                            description: "Initialize or reset the model"
-                        },
-                        {
-                            name: "train_step",
-                            description: "Perform a training step"
-                        },
-                        {
-                            name: "forward_pass",
-                            description: "Perform a forward pass through the model"
-                        },
-                        {
-                            name: "get_memory_state",
-                            description: "Get the current memory state"
-                        }
-                    ]
+                    version: "1.3.1",
+                    description: "Memory-augmented model server",
+                    transport: "stdio",
+                    tools: this.toolSchemas
                 }
             });
-            transport.send({
-                jsonrpc: "2.0",
-                method: "log",
-                params: { message: "Titan Memory Server running on stdio" }
-            });
+            console.log("Server info sent");
+            await this.server.connect(transport);
+            console.log("Server connected");
+            if (!this.testMode) {
+                this.startAutoSave();
+                console.log("Auto-save started");
+            }
         }
         catch (error) {
-            const message = `Fatal error: ${error instanceof Error ? error.message : error}`;
-            console.error(JSON.stringify({
-                jsonrpc: "2.0",
-                method: "error",
-                params: { message }
-            }));
+            console.error("Server startup error:", error);
             process.exit(1);
         }
+    }
+    startAutoSave() {
+        if (this.autoSaveInterval) {
+            clearInterval(this.autoSaveInterval);
+        }
+        this.autoSaveInterval = setInterval(async () => {
+            await this.saveMemoryState().catch(console.error);
+        }, 300000); // Save every 5 minutes
     }
 }
 // CLI entry with proper error handling

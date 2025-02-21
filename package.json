@@ -29,55 +29,135 @@
     "description": "Advanced memory capabilities for maintaining context and learning patterns",
     "transport": "stdio",
     "tools": {
-      "init_model": {
-        "description": "Initialize the Titan Memory model for learning code patterns",
+      "help": {
+        "description": "Get help about available tools",
         "parameters": {
-          "inputDim": {
-            "type": "number",
-            "description": "Size of input vectors (default: 768)",
-            "optional": true
-          },
-          "outputDim": {
-            "type": "number",
-            "description": "Size of memory state (default: 768)",
-            "optional": true
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "Specific tool to get help for"
+            },
+            "category": {
+              "type": "string",
+              "description": "Category of tools to explore"
+            },
+            "showExamples": {
+              "type": "boolean",
+              "description": "Include usage examples"
+            },
+            "verbose": {
+              "type": "boolean",
+              "description": "Include detailed descriptions"
+            }
           }
         }
       },
-      "train_step": {
-        "description": "Train the model on a sequence of code to improve pattern recognition",
+      "init_model": {
+        "description": "Initialize the Titan Memory model for learning code patterns",
         "parameters": {
-          "x_t": {
-            "type": "array",
-            "items": {
-              "type": "number"
+          "type": "object",
+          "properties": {
+            "inputDim": {
+              "type": "number",
+              "description": "Size of input vectors (default: 768)"
             },
-            "description": "Current code state vector"
-          },
-          "x_next": {
-            "type": "array",
-            "items": {
-              "type": "number"
+            "memorySlots": {
+              "type": "number",
+              "description": "Number of memory slots (default: 5000)"
             },
-            "description": "Next code state vector"
+            "transformerLayers": {
+              "type": "number",
+              "description": "Number of transformer layers (default: 6)"
+            }
           }
         }
       },
       "forward_pass": {
-        "description": "Predict the next likely code pattern based on current input",
+        "description": "Process input through the memory model",
         "parameters": {
-          "x": {
-            "type": "array",
-            "items": {
-              "type": "number"
+          "type": "object",
+          "properties": {
+            "x": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "description": "Text input to process"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "description": "Vector input to process"
+                }
+              ]
+            }
+          },
+          "required": [
+            "x"
+          ]
+        }
+      },
+      "train_step": {
+        "description": "Train the model on sequential inputs",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "x_t": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "description": "Current text input"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "description": "Current vector input"
+                }
+              ]
             },
-            "description": "Current code state vector"
-          }
+            "x_next": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "description": "Next text input"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "description": "Next vector input"
+                }
+              ]
+            }
+          },
+          "required": [
+            "x_t",
+            "x_next"
+          ]
         }
       },
       "get_memory_state": {
-        "description": "Get insights about what patterns the model has learned",
-        "parameters": {}
+        "description": "Get the current memory state",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "description": "Type of memory state to retrieve",
+              "enum": [
+                "short_term",
+                "long_term",
+                "meta",
+                "all"
+              ]
+            }
+          }
+        }
       }
     }
   },

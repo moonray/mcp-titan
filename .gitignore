@@ -6,3 +6,4 @@ package-lock.json
 .titan_memory/model.json
 .titan_memory/weights.bin
 test-weights.json
+memory.json
