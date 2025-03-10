@@ -1,0 +1,8 @@
+venv
+.titan_memory
+build
+dist
+__pycache__
+node_modules
+
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)

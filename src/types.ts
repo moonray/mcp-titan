@@ -178,6 +178,24 @@ export interface IMemoryModel {
   save(modelPath: string, weightsPath: string): Promise<void>;
   getMemorySnapshot(): Record<string, tf.Tensor>;
   dispose(): void;
+  resetGradients(): void;
+  initialize(config?: any): Promise<void>;
+
+  getMemoryState(): IMemoryState;
+  resetMemory(): void;
+  getMemoryState(): any;
+  encodeText(text: string): Promise<tf.Tensor1D>;
+  recallMemory(query: string, topK?: number): Promise<tf.Tensor2D[]>;
+  storeMemory(text: string): Promise<void>;
+  distillMemories?(similarMemories: tf.Tensor2D[]): tf.Tensor2D;
+  quantizeMemory?(): IQuantizedMemoryState;
+  dequantizeMemory?(quantizedState: IQuantizedMemoryState): IMemoryState;
+  contrastiveLoss?(anchor: tf.Tensor2D, positive: tf.Tensor2D, negative: tf.Tensor2D, margin?: number): tf.Scalar;
+  trainWithContrastiveLearning?(anchorText: string, positiveText: string, negativeText: string): Promise<number>;
+  pruneMemoryByInformationGain?(threshold?: number): void;
+  storeMemoryWithType?(text: string, isEpisodic?: boolean): Promise<void>;
+  recallMemoryByType?(query: string, type?: 'episodic' | 'semantic' | 'both', topK?: number): Promise<tf.Tensor2D[]>;
+  recallAndDistill?(query: string, topK?: number): Promise<tf.Tensor2D>;
 }
 
 /**
@@ -240,3 +258,101 @@ export const StoreMemoryInput = z.object({
 export const RecallMemoryInput = z.object({
   query: z.string()
 });
+
+export interface IHierarchicalMemoryState extends IMemoryState {
+  workingMemory: tf.Tensor2D;
+  shortTermMemory: tf.Tensor2D;
+  longTermMemory: tf.Tensor2D;
+  workingAccessCounts: tf.Tensor1D;
+  shortTermAccessCounts: tf.Tensor1D;
+  longTermAccessCounts: tf.Tensor1D;
+}
+
+export interface IExtendedMemoryState extends IMemoryState {
+  episodicMemory: tf.Tensor2D;
+  semanticMemory: tf.Tensor2D;
+  episodicTimestamps: tf.Tensor1D;
+  semanticConfidence: tf.Tensor1D;
+}
+
+export interface IQuantizedMemoryState {
+  shortTermQuantized: Int8Array;
+  longTermQuantized: Int8Array;
+  metaQuantized: Int8Array;
+  shortTermShape: number[];
+  longTermShape: number[];
+  metaShape: number[];
+  quantizer: any;
+  timestamps: number[];
+  accessCounts: number[];
+  surpriseHistory: number[];
+}
+
+export interface ITelemetryData {
+  timestamp: number;
+  operation: string;
+  durationMs: number;
+  memoryUsage: {
+    numTensors: number;
+    numBytes: number;
+    unreliable: boolean;
+  };
+  metrics?: Record<string, number>;
+  error?: {
+    name: string;
+    message: string;
+    stack?: string;
+  };
+}
+
+// Add custom error classes
+export class TensorError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TensorError';
+  }
+}
+
+export class MemoryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MemoryError';
+  }
+}
+
+export interface IMemoryModel {
+  // Existing methods
+  forward(x: ITensor, memoryState: IMemoryState): { predicted: ITensor; memoryUpdate: IMemoryUpdateResult };
+  trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): { loss: ITensor; gradients: IModelGradients };
+  pruneMemory(memoryState: IMemoryState, threshold: number): IMemoryState;
+  manifoldStep(base: ITensor, velocity: ITensor): ITensor;
+  getMemorySnapshot(): Record<string, tf.Tensor>;
+  dispose(): void;
+
+  // New methods
+  getMemoryState(): IMemoryState;
+  resetMemory(): void;
+  resetGradients(): void;
+
+  // MCP server compatibility methods
+  init_model(config: any): Promise<{ status: string }>;
+  forward_pass(x: string | number[], memoryState?: IMemoryState): Promise<any>;
+  train_step(x_t: string | number[], x_next: string | number[]): Promise<{ loss: number }>;
+  get_memory_state(): any;
+
+  // Enhanced functionality
+  encodeText(text: string): Promise<tf.Tensor1D>;
+  recallMemory(query: string, topK?: number): Promise<tf.Tensor2D[]>;
+  storeMemory(text: string): Promise<void>;
+
+  // Optional enhanced methods
+  distillMemories?(similarMemories: tf.Tensor2D[]): tf.Tensor2D;
+  quantizeMemory?(): IQuantizedMemoryState;
+  dequantizeMemory?(quantizedState: IQuantizedMemoryState): IMemoryState;
+  contrastiveLoss?(anchor: tf.Tensor2D, positive: tf.Tensor2D, negative: tf.Tensor2D, margin?: number): tf.Scalar;
+  trainWithContrastiveLearning?(anchorText: string, positiveText: string, negativeText: string): Promise<number>;
+  pruneMemoryByInformationGain?(threshold?: number): void;
+  storeMemoryWithType?(text: string, isEpisodic?: boolean): Promise<void>;
+  recallMemoryByType?(query: string, type?: 'episodic' | 'semantic' | 'both', topK?: number): Promise<tf.Tensor2D[]>;
+  recallAndDistill?(query: string, topK?: number): Promise<tf.Tensor2D>;
+}

@@ -109,52 +109,104 @@ export class VectorProcessor {
         return VectorProcessor.instance;
     }
 
+    /**
+     * Process input data into a tensor with appropriate shape
+     * Handles various input types: number, array, string, tensor
+     */
     public processInput(input: number | number[] | string | tf.Tensor): tf.Tensor {
         return this.memoryManager.wrapWithMemoryManagement(() => {
-            if (typeof input === 'string') {
-                // Convert string to vector using simple encoding
-                const encoded = new TextEncoder().encode(input);
-                return tf.tensor1d(Array.from(encoded));
-            } else if (typeof input === 'number') {
-                // Handle single number input
-                return tf.tensor1d([input]);
-            } else if (Array.isArray(input)) {
-                if (input.length === 0) {
-                    throw new Error('Input array cannot be empty');
+            try {
+                // Handle string input
+                if (typeof input === 'string') {
+                    return this.encodeText(input);
                 }
-                if (input.some(val => typeof val !== 'number')) {
-                    throw new Error('All array elements must be numbers');
+
+                // Handle number input (single value)
+                if (typeof input === 'number') {
+                    return tf.tensor2d([[input]]);
                 }
-                return tf.tensor1d(input);
-            } else if (input instanceof tf.Tensor) {
-                if (!input.shape || input.shape.length === 0) {
-                    throw new Error('Invalid tensor shape');
+
+                // Handle array input
+                if (Array.isArray(input)) {
+                    // Check if it's a 1D or 2D array
+                    if (input.length > 0 && Array.isArray(input[0])) {
+                        // It's already 2D
+                        return tf.tensor2d(input as number[][]);
+                    } else {
+                        // It's 1D, convert to 2D
+                        return tf.tensor2d([input]);
+                    }
                 }
-                return input.clone();
+
+                // Handle tensor input
+                if (input instanceof tf.Tensor) {
+                    // Ensure it's 2D
+                    if (input.rank === 1) {
+                        return input.expandDims(0);
+                    } else if (input.rank === 2) {
+                        return input;
+                    } else {
+                        throw new Error(`Unsupported tensor rank: ${input.rank}. Expected 1 or 2.`);
+                    }
+                }
+
+                throw new Error(`Unsupported input type: ${typeof input}`);
+            } catch (error) {
+                console.error('Error processing input:', error);
+                // Return a default tensor in case of error
+                return tf.zeros([1, 768]);
             }
-            throw new Error('Invalid input type');
         });
     }
 
+    /**
+     * Validate and normalize a tensor to match expected shape
+     */
     public validateAndNormalize(tensor: tf.Tensor, expectedShape: number[]): tf.Tensor {
         return this.memoryManager.wrapWithMemoryManagement(() => {
+            // Check if tensor shape matches expected shape
             if (!this.memoryManager.validateVectorShape(tensor, expectedShape)) {
-                throw new Error(`Invalid tensor shape. Expected ${expectedShape}, got ${tensor.shape}`);
+                // Reshape tensor to match expected shape
+                const reshapedTensor = SafeTensorOps.reshape(tensor, expectedShape);
+
+                // Normalize values to be between -1 and 1
+                const normalized = tf.div(reshapedTensor, tf.add(tf.abs(reshapedTensor), 1e-8));
+
+                return normalized;
             }
-            // Normalize the tensor
-            return tf.div(tensor, tf.norm(tensor));
+
+            return tensor;
         });
     }
+
+    /**
+     * Encode text into a tensor representation
+     * Uses a simple character-level encoding with positional information
+     */
     public async encodeText(text: string, maxLength: number = 768): Promise<tf.Tensor> {
         return this.memoryManager.wrapWithMemoryManagement(() => {
-            const encoded = new TextEncoder().encode(text);
-            const padded = new Uint8Array(maxLength);
-            padded.set(encoded.slice(0, maxLength));
-            // Ensure we fill remaining space with zeros
-            for (let i = encoded.length; i < maxLength; i++) {
-                padded[i] = 0;
+            // Convert string to bytes
+            const encoder = new TextEncoder();
+            const bytes = encoder.encode(text);
+
+            // Create a padded array of the specified length
+            const paddedArray = new Float32Array(maxLength).fill(0);
+
+            // Copy bytes and normalize to [-1, 1]
+            for (let i = 0; i < Math.min(bytes.length, maxLength); i++) {
+                // Normalize to [-1, 1] range
+                paddedArray[i] = (bytes[i] / 127.5) - 1;
             }
-            return tf.tensor1d(Array.from(padded));
+
+            // Add positional encoding
+            for (let i = 0; i < Math.min(bytes.length, maxLength); i++) {
+                // Add sine wave positional encoding
+                const position = i / maxLength;
+                paddedArray[i] += Math.sin(position * Math.PI) * 0.1;
+            }
+
+            // Create a 2D tensor (batch size 1)
+            return tf.tensor2d([paddedArray]);
         });
     }
 }

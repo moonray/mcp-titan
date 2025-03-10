@@ -16,6 +16,9 @@ import * as path from 'path';
 import { promises as fs } from 'fs';
 import * as crypto from 'crypto';
 
+/**
+ * Represents a serialized memory state that can be stored and loaded.
+ */
 interface SerializedMemoryState {
   shortTerm: number[];
   longTerm: number[];
@@ -25,23 +28,38 @@ interface SerializedMemoryState {
   surpriseHistory: number[];
 }
 
+/**
+ * Statistics about the memory state.
+ */
 interface MemoryStats {
   shortTermMean: number;
   shortTermStd: number;
   longTermMean: number;
   longTermStd: number;
   capacity: number;
+  surpriseScore: number;
+  patternDiversity: number;
 }
+
+/**
+ * Standard response format for all MCP tools.
+ */
 interface ToolResponse {
   [key: string]: unknown;
   content: Array<{
     [key: string]: unknown;
-    type: "text";
+    type: "text" | "error" | "data";
     text: string;
+    data?: any;
   }>;
   _meta?: Record<string, unknown>;
   isError?: boolean;
 }
+
+/**
+ * Titan Memory Server - A neural memory system that can learn and predict sequences
+ * while maintaining state through a memory vector.
+ */
 export class TitanMemoryServer {
   private server: McpServer;
   private model!: TitanMemoryModel;
@@ -56,7 +74,8 @@ export class TitanMemoryServer {
   constructor(options: { memoryPath?: string } = {}) {
     this.server = new McpServer({
       name: "Titan Memory",
-      version: "1.2.0"
+      version: "1.2.0",
+      description: "A neural memory system for LLMs that can learn and predict sequences while maintaining state"
     });
     this.vectorProcessor = VectorProcessor.getInstance();
     this.memoryPath = options.memoryPath || path.join(process.cwd(), '.titan_memory');
@@ -132,10 +151,10 @@ export class TitanMemoryServer {
     this.server.tool(
       'help',
       {
-        tool: z.string().optional(),
-        category: z.string().optional(),
-        showExamples: z.boolean().optional(),
-        verbose: z.boolean().optional()
+        tool: z.string().optional().describe("Specific tool name to get help for"),
+        category: z.string().optional().describe("Category of tools to explore"),
+        showExamples: z.boolean().optional().describe("Include usage examples"),
+        verbose: z.boolean().optional().describe("Include detailed descriptions")
       },
       async (params, extra) => {
         await this.ensureInitialized();
@@ -148,8 +167,11 @@ export class TitanMemoryServer {
               "- forward_pass: Perform a forward pass through the model\n" +
               "- train_step: Execute a training step\n" +
               "- get_memory_state: Get current memory state\n" +
-              "- save_memory_state: Save memory state to file\n" +
-              "- load_memory_state: Load memory state from file"
+              "- manifold_step: Update memory along a manifold direction\n" +
+              "- prune_memory: Remove less relevant memories\n" +
+              "- save_checkpoint: Save memory state to file\n" +
+              "- load_checkpoint: Load memory state from file\n" +
+              "- reset_gradients: Reset accumulated gradients"
           }]
         };
       }
@@ -159,22 +181,43 @@ export class TitanMemoryServer {
     this.server.tool(
       'init_model',
       {
-        inputDim: z.number().int().positive(),
-        memorySlots: z.number().int().positive(),
-        transformerLayers: z.number().int().positive()
+        inputDim: z.number().int().positive().default(768).describe("Input dimension size"),
+        hiddenDim: z.number().int().positive().default(512).describe("Hidden dimension size"),
+        memoryDim: z.number().int().positive().default(1024).describe("Memory dimension size"),
+        transformerLayers: z.number().int().positive().default(6).describe("Number of transformer layers"),
+        numHeads: z.number().int().positive().default(8).describe("Number of attention heads"),
+        ffDimension: z.number().int().positive().default(2048).describe("Feed-forward dimension"),
+        dropoutRate: z.number().min(0).max(0.9).default(0.1).describe("Dropout rate"),
+        maxSequenceLength: z.number().int().positive().default(512).describe("Maximum sequence length"),
+        memorySlots: z.number().int().positive().default(5000).describe("Number of memory slots"),
+        similarityThreshold: z.number().min(0).max(1).default(0.65).describe("Similarity threshold"),
+        surpriseDecay: z.number().min(0).max(1).default(0.9).describe("Surprise decay rate"),
+        pruningInterval: z.number().int().positive().default(1000).describe("Pruning interval"),
+        gradientClip: z.number().positive().default(1.0).describe("Gradient clipping value")
       },
       async (params, extra) => {
         await this.ensureInitialized();
         const config = {
           inputDim: params.inputDim,
+          hiddenDim: params.hiddenDim || 512,
+          memoryDim: params.memoryDim || 1024,
+          transformerLayers: params.transformerLayers,
+          numHeads: params.numHeads || 8,
+          ffDimension: params.ffDimension || 2048,
+          dropoutRate: params.dropoutRate || 0.1,
+          maxSequenceLength: params.maxSequenceLength || 512,
           memorySlots: params.memorySlots,
-          transformerLayers: params.transformerLayers
+          similarityThreshold: params.similarityThreshold || 0.65,
+          surpriseDecay: params.surpriseDecay || 0.9,
+          pruningInterval: params.pruningInterval || 1000,
+          gradientClip: params.gradientClip || 1.0
         };
         await this.model.initialize(config);
         return {
           content: [{
-            type: "text",
-            text: `Model initialized with configuration: ${JSON.stringify(config)}`
+            type: "data",
+            text: `Model initialized with configuration: ${JSON.stringify(config)}`,
+            data: config
           }]
         };
       }
@@ -184,19 +227,56 @@ export class TitanMemoryServer {
     this.server.tool(
       'forward_pass',
       {
-        x: z.array(z.number())
+        x: z.union([
+          z.array(z.number()),
+          z.string()
+        ]).describe("Input vector or text"),
+        memoryState: z.object({
+          shortTerm: z.array(z.number()).optional(),
+          longTerm: z.array(z.number()).optional(),
+          meta: z.array(z.number()).optional(),
+          timestamps: z.array(z.number()).optional(),
+          accessCounts: z.array(z.number()).optional(),
+          surpriseHistory: z.array(z.number()).optional()
+        }).optional().describe("Memory state to use")
       },
       async (params, extra) => {
         await this.ensureInitialized();
-        const input = tf.tensor2d([params.x]);
-        const result = await this.model.forward(wrapTensor(input), this.memoryState);
+
+        const input = await this.processInput(params.x);
+
+        // Use provided memory state or current state
+        let memoryState = this.memoryState;
+        if (params.memoryState) {
+          // Convert arrays to tensors
+          memoryState = this.wrapWithMemoryManagement(() => ({
+            shortTerm: wrapTensor(tf.tensor(params.memoryState?.shortTerm || [])),
+            longTerm: wrapTensor(tf.tensor(params.memoryState?.longTerm || [])),
+            meta: wrapTensor(tf.tensor(params.memoryState?.meta || [])),
+            timestamps: wrapTensor(tf.tensor(params.memoryState?.timestamps || [])),
+            accessCounts: wrapTensor(tf.tensor(params.memoryState?.accessCounts || [])),
+            surpriseHistory: wrapTensor(tf.tensor(params.memoryState?.surpriseHistory || []))
+          }));
+        }
+
+        const result = await this.model.forward(wrapTensor(input), memoryState);
+
+        // Update memory state
+        this.memoryState = result.memoryUpdate.newState;
+
         return {
           content: [{
-            type: "text",
-            text: JSON.stringify({
+            type: "data",
+            text: "Forward pass completed successfully",
+            data: {
               predicted: Array.from(unwrapTensor(result.predicted).dataSync()),
-              surprise: Array.from(unwrapTensor(result.memoryUpdate.surprise.immediate).dataSync())
-            })
+              memoryUpdate: {
+                surprise: {
+                  immediate: Array.from(unwrapTensor(result.memoryUpdate.surprise.immediate).dataSync()),
+                  accumulated: Array.from(unwrapTensor(result.memoryUpdate.surprise.accumulated).dataSync())
+                }
+              }
+            }
           }]
         };
       }
@@ -206,20 +286,39 @@ export class TitanMemoryServer {
     this.server.tool(
       'train_step',
       {
-        x_t: z.array(z.number()),
-        x_next: z.array(z.number())
+        x_t: z.union([
+          z.array(z.number()),
+          z.string()
+        ]).describe("Current input vector or text"),
+        x_next: z.union([
+          z.array(z.number()),
+          z.string()
+        ]).describe("Next input vector or text")
       },
       async (params, extra) => {
         await this.ensureInitialized();
-        const x_t = tf.tensor2d([params.x_t]);
-        const x_next = tf.tensor2d([params.x_next]);
-        const result = await this.model.trainStep(wrapTensor(x_t), wrapTensor(x_next), this.memoryState);
+
+        const x_t = await this.processInput(params.x_t);
+        const x_next = await this.processInput(params.x_next);
+
+        const result = await this.model.trainStep(
+          wrapTensor(x_t),
+          wrapTensor(x_next),
+          this.memoryState
+        );
+
         return {
           content: [{
-            type: "text",
-            text: JSON.stringify({
-              loss: Array.from(unwrapTensor(result.loss).dataSync())
-            })
+            type: "data",
+            text: "Training step completed successfully",
+            data: {
+              loss: Array.from(unwrapTensor(result.loss).dataSync()),
+              gradients: {
+                shortTerm: Array.from(unwrapTensor(result.gradients.shortTerm).dataSync().slice(0, 10)) + "...",
+                longTerm: Array.from(unwrapTensor(result.gradients.longTerm).dataSync().slice(0, 10)) + "...",
+                meta: Array.from(unwrapTensor(result.gradients.meta).dataSync().slice(0, 10)) + "..."
+              }
+            }
           }]
         };
       }
@@ -228,54 +327,194 @@ export class TitanMemoryServer {
     // Get memory state tool
     this.server.tool(
       'get_memory_state',
+      {
+        type: z.string().optional().describe("Optional memory type filter")
+      },
+      async (params, extra) => {
+        await this.ensureInitialized();
+
+        // Get memory snapshot
+        const state = this.model.getMemorySnapshot();
+
+        // Calculate memory statistics
+        const stats = this.wrapWithMemoryManagement(() => {
+          const shortTermMean = state.shortTerm.mean().dataSync()[0];
+          const shortTermStd = tf.moments(state.shortTerm).variance.sqrt().dataSync()[0];
+          const longTermMean = state.longTerm.mean().dataSync()[0];
+          const longTermStd = tf.moments(state.longTerm).variance.sqrt().dataSync()[0];
+
+          // Calculate surprise score (average of recent surprise history)
+          const surpriseHistory = unwrapTensor(this.memoryState.surpriseHistory);
+          const surpriseScore = surpriseHistory.size > 0
+            ? surpriseHistory.mean().dataSync()[0]
+            : 0;
+
+          // Calculate pattern diversity (using standard deviation of meta memory)
+          const meta = unwrapTensor(this.memoryState.meta);
+          const patternDiversity = meta.size > 0
+            ? tf.moments(meta).variance.sqrt().mean().dataSync()[0]
+            : 0;
+
+          // Calculate memory capacity
+          const memorySlots = this.model.getConfig().memorySlots;
+          const usedSlots = unwrapTensor(this.memoryState.timestamps).shape[0];
+          const capacity = 1 - (usedSlots / memorySlots);
+
+          return {
+            shortTermMean,
+            shortTermStd,
+            longTermMean,
+            longTermStd,
+            surpriseScore,
+            patternDiversity,
+            capacity
+          };
+        });
+
+        return {
+          content: [{
+            type: "data",
+            text: "Memory state retrieved successfully",
+            data: {
+              stats,
+              capacity: stats.capacity,
+              status: stats.capacity > 0.3 ? "active" : "pruning",
+              timestamps: Array.from(unwrapTensor(this.memoryState.timestamps).dataSync()),
+              accessCounts: Array.from(unwrapTensor(this.memoryState.accessCounts).dataSync())
+            }
+          }]
+        };
+      }
+    );
+
+    // Manifold step tool
+    this.server.tool(
+      'manifold_step',
+      {
+        base: z.array(z.number()).describe("Base memory state"),
+        velocity: z.array(z.number()).describe("Update direction")
+      },
+      async (params, extra) => {
+        await this.ensureInitialized();
+
+        const base = tf.tensor(params.base);
+        const velocity = tf.tensor(params.velocity);
+
+        const result = await this.model.manifoldStep(
+          wrapTensor(base),
+          wrapTensor(velocity)
+        );
+
+        return {
+          content: [{
+            type: "data",
+            text: "Manifold step completed successfully",
+            data: {
+              newBase: Array.from(unwrapTensor(result).dataSync())
+            }
+          }]
+        };
+      }
+    );
+
+    // Prune memory tool
+    this.server.tool(
+      'prune_memory',
+      {
+        threshold: z.number().min(0).max(1).describe("Pruning threshold (0-1)")
+      },
+      async (params, extra) => {
+        await this.ensureInitialized();
+
+        this.memoryState = this.model.pruneMemory(this.memoryState, params.threshold);
+
+        // Get updated stats after pruning
+        const stats = this.wrapWithMemoryManagement(() => {
+          const memorySlots = this.model.getConfig().memorySlots;
+          const usedSlots = unwrapTensor(this.memoryState.timestamps).shape[0];
+          const capacity = 1 - (usedSlots / memorySlots);
+          return { capacity };
+        });
+
+        return {
+          content: [{
+            type: "data",
+            text: "Memory pruned successfully",
+            data: {
+              newCapacity: stats.capacity,
+              remainingEntries: unwrapTensor(this.memoryState.timestamps).shape[0]
+            }
+          }]
+        };
+      }
+    );
+
+    // Save checkpoint tool
+    this.server.tool(
+      'save_checkpoint',
+      {
+        path: z.string().describe("Checkpoint file path")
+      },
+      async (params, extra) => {
+        await this.ensureInitialized();
+
+        const checkpointPath = params.path;
+        await this.saveMemoryState(checkpointPath);
+
+        return {
+          content: [{
+            type: "text",
+            text: `Memory state saved to ${checkpointPath}`
+          }]
+        };
+      }
+    );
+
+    // Load checkpoint tool
+    this.server.tool(
+      'load_checkpoint',
+      {
+        path: z.string().describe("Checkpoint file path")
+      },
+      async (params, extra) => {
+        await this.ensureInitialized();
+
+        const checkpointPath = params.path;
+        const success = await this.loadSavedState(checkpointPath);
+
+        if (!success) {
+          return {
+            content: [{
+              type: "error",
+              text: `Failed to load memory state from ${checkpointPath}`
+            }],
+            isError: true
+          };
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `Memory state loaded from ${checkpointPath}`
+          }]
+        };
+      }
+    );
+
+    // Reset gradients tool
+    this.server.tool(
+      'reset_gradients',
       {},
       async (params, extra) => {
         await this.ensureInitialized();
-        const state = this.model.getMemorySnapshot();
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              shortTerm: Array.from(state.shortTerm.dataSync()),
-              longTerm: Array.from(state.longTerm.dataSync()),
-              meta: Array.from(state.meta.dataSync())
-            })
-          }]
-        };
-      }
-    );
 
-    // Save memory state tool
-    this.server.tool(
-      'save_memory_state',
-      {
-        path: z.string()
-      },
-      async (params, extra) => {
-        await this.ensureInitialized();
-        await this.model.saveModel(params.path);
-        return {
-          content: [{
-            type: "text",
-            text: `Memory state saved to ${params.path}`
-          }]
-        };
-      }
-    );
+        // Reset optimizer state
+        this.model.resetGradients();
 
-    // Load memory state tool
-    this.server.tool(
-      'load_memory_state',
-      {
-        path: z.string()
-      },
-      async (params, extra) => {
-        await this.ensureInitialized();
-        await this.model.loadModel(params.path);
         return {
           content: [{
             type: "text",
-            text: `Memory state loaded from ${params.path}`
+            text: "Gradients reset successfully"
           }]
         };
       }
@@ -283,47 +522,48 @@ export class TitanMemoryServer {
   }
 
   private async processInput(input: string | number[] | tf.Tensor | number): Promise<tf.Tensor> {
-    return tf.tidy(() => {
+    return this.wrapWithMemoryManagement(() => {
       try {
+        // Handle string input
         if (typeof input === 'string') {
-          // Convert string to bytes and pad/truncate to exactly 768 elements
-          const encoder = new TextEncoder();
-          const bytes = encoder.encode(input);
-          const paddedArray = new Float32Array(768).fill(0);
-
-          // Copy bytes and normalize to [0,1]
-          for (let i = 0; i < Math.min(bytes.length, 768); i++) {
-            paddedArray[i] = bytes[i] / 255;
-          }
-
-          return tf.tensor1d(paddedArray);
-        } else if (Array.isArray(input)) {
-          // Pad or truncate array to exactly 768 elements
-          const paddedArray = new Float32Array(768).fill(0);
-          const inputArray = input.slice(0, 768);
-          paddedArray.set(inputArray);
-          return tf.tensor1d(paddedArray);
-        } else if (input instanceof tf.Tensor) {
-          // Ensure tensor is flattened and has exactly 768 elements
-          const flattened = input.flatten();
-          const inputData = flattened.dataSync();
-          const paddedData = new Float32Array(768).fill(0);
-          paddedData.set(Array.from(inputData).slice(0, 768));
-
-          // Clean up intermediate tensor
-          if (flattened !== input) {
-            flattened.dispose();
-          }
-
-          return tf.tensor1d(paddedData);
-        } else if (typeof input === 'number') {
-          // Create a tensor of 768 elements filled with the input number
-          return tf.ones([768]).mul(tf.scalar(input));
+          // Use vectorProcessor to encode text
+          return this.vectorProcessor.encodeText(input);
         }
-        throw new Error('Invalid input type');
+
+        // Handle number input (single value)
+        if (typeof input === 'number') {
+          return tf.tensor2d([[input]]);
+        }
+
+        // Handle array input
+        if (Array.isArray(input)) {
+          // Check if it's a 1D or 2D array
+          if (input.length > 0 && Array.isArray(input[0])) {
+            // It's already 2D
+            return tf.tensor2d(input as number[][]);
+          } else {
+            // It's 1D, convert to 2D
+            return tf.tensor2d([input]);
+          }
+        }
+
+        // Handle tensor input
+        if (input instanceof tf.Tensor) {
+          // Ensure it's 2D
+          if (input.rank === 1) {
+            return input.expandDims(0);
+          } else if (input.rank === 2) {
+            return input;
+          } else {
+            throw new Error(`Unsupported tensor rank: ${input.rank}. Expected 1 or 2.`);
+          }
+        }
+
+        throw new Error(`Unsupported input type: ${typeof input}`);
       } catch (error) {
         console.error('Error processing input:', error);
-        throw error;
+        // Return a default tensor in case of error
+        return tf.zeros([1, this.model.getConfig().inputDim || 768]);
       }
     });
   }
@@ -506,38 +746,67 @@ export class TitanMemoryServer {
     }
   }
 
+  /**
+   * Run the Titan Memory Server
+   * This method initializes the server and connects to the transport
+   */
   public async run(): Promise<void> {
     try {
-      // Initialize TensorFlow.js backend first
-      await tf.ready();
-      await tf.setBackend('tensorflow');
+      console.log('Starting Titan Memory Server...');
 
-      // Verify backend is ready
-      const backend = tf.getBackend();
-      if (!backend) {
-        throw new Error('Failed to initialize TensorFlow.js backend');
+      // Ensure the model is initialized
+      await this.ensureInitialized();
+
+      // Set up auto-save interval
+      if (!this.autoSaveInterval) {
+        this.autoSaveInterval = setInterval(async () => {
+          try {
+            await this.saveMemoryState();
+            console.log('Auto-saved memory state');
+          } catch (error) {
+            console.error('Error during auto-save:', error);
+          }
+        }, 5 * 60 * 1000); // Auto-save every 5 minutes
       }
 
-      console.log('TensorFlow backend initialized:', backend);
-
-      // Initialize server
-      await this.autoInitialize();
+      // Connect to the transport
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
 
-      transport.send({
-        jsonrpc: "2.0",
-        method: "log",
-        params: { message: "Titan Memory Server running on stdio" }
+      console.log(`Titan Memory Server v${this.server.version} running`);
+      console.log('Available tools:');
+
+      // List available tools
+      const tools = Object.keys(this.server.tools || {});
+      tools.forEach(tool => {
+        console.log(`- ${tool}`);
       });
-    } catch (error: unknown) {
-      const message = `Fatal error: ${error instanceof Error ? error.message : error}`;
-      console.error(JSON.stringify({
-        jsonrpc: "2.0",
-        method: "error",
-        params: { message }
-      }));
-      process.exit(1);
+
+      // Handle process termination
+      process.on('SIGINT', async () => {
+        console.log('Shutting down Titan Memory Server...');
+
+        // Save memory state before exit
+        try {
+          await this.saveMemoryState();
+          console.log('Memory state saved');
+        } catch (error) {
+          console.error('Error saving memory state:', error);
+        }
+
+        // Clean up resources
+        if (this.autoSaveInterval) {
+          clearInterval(this.autoSaveInterval);
+        }
+
+        // Dispose tensors
+        this.model.dispose();
+
+        process.exit(0);
+      });
+    } catch (error) {
+      console.error('Error starting Titan Memory Server:', error);
+      throw error;
     }
   }
 }

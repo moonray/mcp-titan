@@ -1,152 +1,184 @@
 # Titan Memory MCP Server
 
 
+A neural memory system for LLMs that can learn and predict sequences while maintaining state through a memory vector. This MCP (Model Context Protocol) server provides tools for Claude 3.7 Sonnet and other LLMs to maintain memory state across interactions.
 
-A MCP server built with a three-tier memory architecture that handles storage as follows:
+## Features
 
-- **Short-term memory:** Holds the immediate conversational context in RAM.
-- **Long-term memory:** Persists core patterns and knowledge over time. This state is saved automatically.
-- **Meta memory:** Keeps higher-level abstractions that support context-aware responses.
+- **Perfect for Cursor**: Now that Cursor automatically runs MCP in yolo mode, you can take your hands off the wheel with your LLM's new memory
+- **Neural Memory Architecture**: Transformer-based memory system that can learn and predict sequences
+- **Memory Management**: Efficient tensor operations with automatic memory cleanup
+- **MCP Integration**: Fully compatible with Cursor and other MCP clients
+- **Text Encoding**: Convert text inputs to tensor representations
+- **Memory Persistence**: Save and load memory states between sessions
 
-[![smithery badge](https://smithery.ai/badge/@henryhawke/mcp-titan)](https://smithery.ai/server/@henryhawke/mcp-titan)
-
-## 📦 Installation
-
-CHECK OUT docs/guides/how-to.md for more information on how to install and run the server.
-
-## 🚀 Quick Start
-
-1. Basic Installation (uses default memory path):
+## Installation
 
 ```bash
-npx -y @smithery/cli@latest run @henryhawke/mcp-titan
+# Clone the repository
+git clone https://github.com/yourusername/titan-memory.git
+cd titan-memory
+
+# Install dependencies
+npm install
+
+# Build the project
+npm run build
+
+# Start the server
+npm start
 ```
 
-2. With Custom Memory Path:
+## Available Tools
 
-```bash
-npx -y @smithery/cli@latest run @henryhawke/mcp-titan --config '{
-  "memoryPath": "/path/to/your/memory/directory"
-}'
-```
+The Titan Memory MCP server provides the following tools:
 
-The server will automatically:
+### `help`
 
-- Initialize in the specified directory (or default location)
-- Maintain persistent memory state
-- Save model weights and configuration
-- Learn from interactions
+Get help about available tools.
 
-## 📂 Memory Storage
+**Parameters:**
 
-By default, the server stores memory files in:
+- `tool` (optional): Specific tool name to get help for
+- `category` (optional): Category of tools to explore
+- `showExamples` (optional): Include usage examples
+- `verbose` (optional): Include detailed descriptions
 
-- **Windows:** `%APPDATA%\.mcp-titan`
-- **MacOS/Linux:** `~/.mcp-titan`
+### `init_model`
 
-You can customize the storage location using the `memoryPath` configuration:
+Initialize the Titan Memory model with custom configuration.
 
-```bash
-# Example with all configuration options
-npx -y @smithery/cli@latest run @henryhawke/mcp-titan --config '{
-  "port": 3000,
-  "memoryPath": "/custom/path/to/memory",
-  "inputDim": 768,
-  "outputDim": 768
-}'
-```
+**Parameters:**
 
-The following files will be created in the memory directory:
+- `inputDim`: Input dimension size (default: 768)
+- `hiddenDim`: Hidden dimension size (default: 512)
+- `memoryDim`: Memory dimension size (default: 1024)
+- `transformerLayers`: Number of transformer layers (default: 6)
+- `numHeads`: Number of attention heads (default: 8)
+- `ffDimension`: Feed-forward dimension (default: 2048)
+- `dropoutRate`: Dropout rate (default: 0.1)
+- `maxSequenceLength`: Maximum sequence length (default: 512)
+- `memorySlots`: Number of memory slots (default: 5000)
+- `similarityThreshold`: Similarity threshold (default: 0.65)
+- `surpriseDecay`: Surprise decay rate (default: 0.9)
+- `pruningInterval`: Pruning interval (default: 1000)
+- `gradientClip`: Gradient clipping value (default: 1.0)
 
-- `memory.json`: Current memory state
-- `model.json`: Model architecture
-- `weights/`: Model weights directory
+### `forward_pass`
 
-## Example usage
+Perform a forward pass through the model to get predictions.
 
-Usage Example:
+**Parameters:**
 
-```typescript
-const model = new TitanMemoryModel({
+- `x`: Input vector or text
+- `memoryState` (optional): Memory state to use
+
+### `train_step`
+
+Execute a training step to update the model.
+
+**Parameters:**
+
+- `x_t`: Current input vector or text
+- `x_next`: Next input vector or text
+
+### `get_memory_state`
+
+Get the current memory state and statistics.
+
+**Parameters:**
+
+- `type` (optional): Optional memory type filter
+
+### `manifold_step`
+
+Update memory along a manifold direction.
+
+**Parameters:**
+
+- `base`: Base memory state
+- `velocity`: Update direction
+
+### `prune_memory`
+
+Remove less relevant memories to free up space.
+
+**Parameters:**
+
+- `threshold`: Pruning threshold (0-1)
+
+### `save_checkpoint`
+
+Save memory state to a file.
+
+**Parameters:**
+
+- `path`: Checkpoint file path
+
+### `load_checkpoint`
+
+Load memory state from a file.
+
+**Parameters:**
+
+- `path`: Checkpoint file path
+
+### `reset_gradients`
+
+Reset accumulated gradients to recover from training issues.
+
+**Parameters:** None
+
+## Usage with Claude 3.7 Sonnet in Cursor
+
+The Titan Memory MCP server is designed to work seamlessly with Claude 3.7 Sonnet in Cursor. Here's an example of how to use it:
+
+```javascript
+// Initialize the model
+const result = await callTool("init_model", {
+  inputDim: 768,
   memorySlots: 10000,
   transformerLayers: 8,
 });
 
-// Store semantic memory
-await model.storeMemory("User prefers dark mode and large text");
+// Perform a forward pass
+const { predicted, memoryUpdate } = await callTool("forward_pass", {
+  x: "const x = 5;", // or vector: [0.1, 0.2, ...]
+  memoryState: currentMemory,
+});
 
-// Recall relevant memories
-const results = await model.recallMemory("interface preferences", 3);
-results.forEach((memory) => console.log(memory.arraySync()));
+// Train the model
+const result = await callTool("train_step", {
+  x_t: "function hello() {",
+  x_next: "  console.log('world');",
+});
 
-// Continuous learning
-model.trainStep(
-  wrapTensor(currentInput),
-  wrapTensor(targetOutput),
-  model.getMemoryState()
-);
+// Get memory state
+const state = await callTool("get_memory_state", {});
 ```
 
-## 🤖 LLM Integration
+## Memory Management
 
-To integrate with your LLM:
+The Titan Memory MCP server includes sophisticated memory management to prevent memory leaks and ensure efficient tensor operations:
 
-1. Copy the contents of `docs/llm-system-prompt.md` into your LLM's system prompt
-2. The LLM will automatically:
-   - Use the memory system for every interaction
-   - Learn from conversations
-   - Provide context-aware responses
-   - Maintain persistent knowledge
+1. **Automatic Cleanup**: Periodically cleans up unused tensors
+2. **Memory Encryption**: Securely stores memory states
+3. **Tensor Validation**: Ensures tensors have the correct shape
+4. **Error Recovery**: Handles tensor errors gracefully
 
-## 🔄 Automatic Features
+## Architecture
 
-- Self-initialization
-- WebSocket and stdio transport support
-- Automatic state persistence
-- Real-time memory updates
-- Error recovery and reconnection
-- Resource cleanup
+The Titan Memory MCP server is built with a modular architecture:
 
-## 🧠 Memory Architecture
+- **TitanMemoryServer**: Main server class that registers tools and handles requests
+- **TitanMemoryModel**: Neural memory model implementation
+- **VectorProcessor**: Handles input processing and text encoding
+- **MemoryManager**: Manages tensor operations and memory cleanup
 
-Three-tier memory system:
+## Contributing
 
-- Short-term memory for immediate context
-- Long-term memory for persistent patterns
-- Meta memory for high-level abstractions
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-## 🛠️ Configuration Options
+## License
 
-| Option       | Description                    | Default        |
-| ------------ | ------------------------------ | -------------- |
-| `port`       | HTTP/WebSocket port            | `0` (disabled) |
-| `memoryPath` | Custom memory storage location | `~/.mcp-titan` |
-| `inputDim`   | Size of input vectors          | `768`          |
-| `outputDim`  | Size of memory state           | `768`          |
-
-## 📚 Technical Details
-
-- Built with TensorFlow.js
-- WebSocket and stdio transport support
-- Automatic tensor cleanup
-- Type-safe implementation
-- Memory-efficient design
-
-## 🔒 Security Considerations
-
-When using a custom memory path:
-
-- Ensure the directory has appropriate permissions
-- Use a secure location not accessible to other users
-- Consider encrypting sensitive memory data
-- Backup memory files regularly
-
-## 📝 License
-
-MIT License - feel free to use and modify!
-
-## 🙏 Acknowledgments
-
-- Built with [Model Context Protocol](https://modelcontextprotocol.io)
-- Uses [TensorFlow.js](https://tensorflow.org/js)
-- Inspired by [synthience/mcp-titan-cognitive-memory](https://github.com/synthience/mcp-titan-cognitive-memory/)
+This project is licensed under the MIT License - see the LICENSE file for details.
