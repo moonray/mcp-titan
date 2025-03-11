@@ -1,18 +1,14 @@
 import { TitanMemoryServer } from '../index.js';
-import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 describe('TitanMemoryServer Tests', () => {
   let server: TitanMemoryServer;
-  let handler: any;
-
   beforeAll(async () => {
     process.env.NODE_ENV = 'test';
     server = new TitanMemoryServer();
-    await server.run();
-    handler = server['server']['_requestHandlers'].get('tools/call');
-
+    await server.run({ connectTransport: false });
+    
     // Initialize the model first with smaller dimensions for testing
-    await handler({
+    await server.handleRequest({
       jsonrpc: '2.0',
       method: 'tools/call',
       params: {
@@ -28,7 +24,21 @@ describe('TitanMemoryServer Tests', () => {
 
   afterAll(async () => {
     if (server) {
-      await server['cleanup']();
+      try {
+        // Call cleanup using the private method accessor
+        // We handle exceptions since we expect the cleanup to work even if there are errors
+        await server['cleanup']().catch(err => {
+          console.warn('Warning during server cleanup:', err instanceof Error ? err.message : String(err));
+        });
+      } catch (err) {
+        console.warn('Warning during server cleanup:', err instanceof Error ? err.message : String(err));
+      } finally {
+        // Additional cleanup to ensure no open handles
+        // Force process.exit not to wait for anything
+        jest.clearAllTimers();
+        jest.resetAllMocks();
+        process.removeAllListeners();
+      }
     }
     process.env.NODE_ENV = undefined;
   });
@@ -47,7 +57,7 @@ describe('TitanMemoryServer Tests', () => {
       id: 1
     };
 
-    const response = await handler(request);
+    const response = await server.handleRequest(request);
     expect(response.content[0].text).toBeDefined();
     const result = JSON.parse(response.content[0].text);
     expect(result.config).toMatchObject({
@@ -60,7 +70,7 @@ describe('TitanMemoryServer Tests', () => {
     const x_t = Array(32).fill(0).map(() => Math.random());
     const x_next = Array(32).fill(0).map(() => Math.random());
 
-    const response = await handler({
+    const response = await server.handleRequest({
       jsonrpc: '2.0',
       method: 'tools/call',
       params: {
@@ -80,7 +90,7 @@ describe('TitanMemoryServer Tests', () => {
   test('Forward pass with valid input', async () => {
     const x = Array(32).fill(0).map(() => Math.random());
 
-    const response = await handler({
+    const response = await server.handleRequest({
       jsonrpc: '2.0',
       method: 'tools/call',
       params: {
@@ -98,7 +108,7 @@ describe('TitanMemoryServer Tests', () => {
   });
 
   test('Get memory state', async () => {
-    const response = await handler({
+    const response = await server.handleRequest({
       jsonrpc: '2.0',
       method: 'tools/call',
       params: {

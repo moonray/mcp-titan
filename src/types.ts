@@ -17,14 +17,14 @@ export type TensorContainer = { [key: string]: tf.Tensor | TensorContainer };
  * @param tensor TensorFlow.js tensor to wrap
  * @returns Wrapped tensor
  */
-export const wrapTensor = (t: tf.Tensor) => t;
+export const wrapTensor = (t: tf.Tensor): ITensor => t;
 
 /**
  * Unwraps a tensor to get the underlying TensorFlow.js tensor.
  * @param tensor Tensor to unwrap
  * @returns Underlying TensorFlow.js tensor
  */
-export const unwrapTensor = (t: ITensor) => t;
+export const unwrapTensor = (t: ITensor): tf.Tensor => t;
 
 /**
  * Interface defining the core tensor operations available in the system.
@@ -198,56 +198,6 @@ export interface IMemoryModel {
   recallAndDistill?(query: string, topK?: number): Promise<tf.Tensor2D>;
 }
 
-/**
- * Interface for server capabilities.
- */
-export interface ServerCapabilities {
-  name: string;
-  version: string;
-  description?: string;
-  transport: string;
-  tools: Record<string, {
-    description: string;
-    parameters: Record<string, unknown>;
-  }>;
-}
-
-/**
- * Interface for tool call requests.
- */
-export interface CallToolRequest {
-  name: string;
-  parameters: Record<string, unknown>;
-}
-
-/**
- * Interface for tool call results.
- */
-export interface CallToolResult {
-  content: Array<{
-    type: string;
-    text: string;
-  }>;
-}
-
-/**
- * Interface for transport layer.
- */
-export interface Transport {
-  connect(): Promise<void>;
-  disconnect(): Promise<void>;
-  onRequest(handler: (request: CallToolRequest) => Promise<CallToolResult>): void;
-  send?(message: unknown): void;
-}
-
-/**
- * Interface for MCP server.
- */
-export interface McpServer {
-  tool(name: string, schema: z.ZodRawShape | string, handler: Function): void;
-  connect(transport: Transport): Promise<void>;
-}
-
 // Memory Operation Schemas
 export const StoreMemoryInput = z.object({
   subject: z.string(),
@@ -318,41 +268,4 @@ export class MemoryError extends Error {
     super(message);
     this.name = 'MemoryError';
   }
-}
-
-export interface IMemoryModel {
-  // Existing methods
-  forward(x: ITensor, memoryState: IMemoryState): { predicted: ITensor; memoryUpdate: IMemoryUpdateResult };
-  trainStep(x_t: ITensor, x_next: ITensor, memoryState: IMemoryState): { loss: ITensor; gradients: IModelGradients };
-  pruneMemory(memoryState: IMemoryState, threshold: number): IMemoryState;
-  manifoldStep(base: ITensor, velocity: ITensor): ITensor;
-  getMemorySnapshot(): Record<string, tf.Tensor>;
-  dispose(): void;
-
-  // New methods
-  getMemoryState(): IMemoryState;
-  resetMemory(): void;
-  resetGradients(): void;
-
-  // MCP server compatibility methods
-  init_model(config: any): Promise<{ status: string }>;
-  forward_pass(x: string | number[], memoryState?: IMemoryState): Promise<any>;
-  train_step(x_t: string | number[], x_next: string | number[]): Promise<{ loss: number }>;
-  get_memory_state(): any;
-
-  // Enhanced functionality
-  encodeText(text: string): Promise<tf.Tensor1D>;
-  recallMemory(query: string, topK?: number): Promise<tf.Tensor2D[]>;
-  storeMemory(text: string): Promise<void>;
-
-  // Optional enhanced methods
-  distillMemories?(similarMemories: tf.Tensor2D[]): tf.Tensor2D;
-  quantizeMemory?(): IQuantizedMemoryState;
-  dequantizeMemory?(quantizedState: IQuantizedMemoryState): IMemoryState;
-  contrastiveLoss?(anchor: tf.Tensor2D, positive: tf.Tensor2D, negative: tf.Tensor2D, margin?: number): tf.Scalar;
-  trainWithContrastiveLearning?(anchorText: string, positiveText: string, negativeText: string): Promise<number>;
-  pruneMemoryByInformationGain?(threshold?: number): void;
-  storeMemoryWithType?(text: string, isEpisodic?: boolean): Promise<void>;
-  recallMemoryByType?(query: string, type?: 'episodic' | 'semantic' | 'both', topK?: number): Promise<tf.Tensor2D[]>;
-  recallAndDistill?(query: string, topK?: number): Promise<tf.Tensor2D>;
 }

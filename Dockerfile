@@ -23,7 +23,7 @@ FROM node:18-alpine AS release
 WORKDIR /app
 
 # Copy the built application from the builder stage
-COPY --from=builder /app/build ./build
+COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 
@@ -31,4 +31,4 @@ COPY --from=builder /app/package.json ./
 EXPOSE 3000
 
 # Set the command to run the application
-CMD ["node", "build/index.js"]
+CMD ["node", "dist/index.js"]

@@ -1,21 +1,14 @@
+# OS files
+.DS_Store
 
-/node_modules
+# Build output
 /build
-/build/*
-build/
 
+# Dependencies
+/node_modules
 package-lock.json
 
-.titan_memory/
-.titan_memory/*
-
-
-/node_modules
-/build
-package-lock.json
-.titan_memory
-.titan_memory/model.json
-.titan_memory/weights.bin
-test-weights.json
+# Generated files
+/.titan_memory
 memory.json
-package-lock.json
+test-weights.json
